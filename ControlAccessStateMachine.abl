@@ -1,0 +1,3151 @@
+MODULE      ControlAccess
+
+INTERFACE  (Instruction15..Instruction0,
+            Flag7..Flag0, Reset, Clock
+                          -> 
+" ALU control signals
+ALUFblockControl3..ALUFblockControl0,
+ALUSubtract,
+ALUAddCarry,
+ALUCarrySub,
+ALUNotLoad,
+ALUShiftMid,
+ALUShiftHighControl2..ALUShiftHighControl0,
+ALUShiftLow1..ALUShiftLow0,
+ALUSelectShift, 
+ALUSignZeroMask,
+ALUCarryOverflowMask,
+ALULoadFlags,
+ALUSetCarry,
+ALUHold,
+" Data access stuff
+DAUPostSelect,
+DAUIncDecControl,
+DAUAddressSourceControl1,
+DAUAddressSourceControl0, 
+DAUOffsetSourceControl,
+DAUChangeX,
+DAUChangeS,
+
+" Program Access signals
+PAUProgramControl2..PAUProgramControl0,
+PAULoad0,
+
+" PAU offset - 0 takes it from the instruction (immediate addressing), 
+"              1 is from DataDB (absolute addressing)
+ControlSelectDataBusPAU,
+
+" DataDB Control Signals
+ControlDataBus1,
+ControlDataBus0,
+
+" ALU Data Input Signals
+" 10 for s reg, 11 for immediate (ProgramAB)
+" 00 for Datadb, 01 for x reg
+ControlALUDataInput1,
+ControlALUDataInput0,
+
+" Control Control signals
+" Write Signals signify writing to data data Buses
+" Read Signals signify reading from the data data Bus
+
+ControlWriteSignal,
+ControlIOSignal,
+ControlReadSignal,
+
+" Instruction Register
+InstructionReg15..InstructionReg0
+)
+
+TITLE      'ControlAccess module';
+
+" Description:  This module is is the Control Unit. 
+"               Instruction Register (sixteen bits) 
+"               and the logic for generating the control 
+"               signals for each of the other modules. Consult 
+"               the various other modules to see the specifics of each
+"               signals
+
+" Inputs:       Instruction[15..0]    - 8 bits of data or offset input
+"               Reset            - system reset
+"               Clock            - system clock
+"
+" Outputs:      Each module control signals + PAU offsetsignal + Datadb 
+"               Control SIgnals + ALU data input signals for the 3 muxes
+"               + Control Write/IO/RD signals
+
+
+" Revision History:
+" 02/06/18   Glen George  Initial Revision
+" 02/14/18   Glen George  Fixed some typos
+" 02/14/18   Glen George  Specialized for Program Memory Access Unit
+" 01/08/20   Glen George  Updated comments
+" 01/04/21   Glen George  Updated comments
+" 03/06/24   Kevin Do     Sadly starting the control unit
+" 03/08/24   Kevin Do     Initial Revisions
+" 03/10/24   Kevin Do     Finished up Control Unit
+" 03/14/24   Kevin Do     Modified to include State Machine
+
+" Inputs
+Instruction15..Instruction0           pin;
+Flag7..Flag0                          pin;
+
+" Outputs
+
+" ALU control signals
+ALUFblockControl3..ALUFblockControl0  pin ;
+ALUSubtract                           pin ;
+ALUAddCarry                           pin ;
+ALUCarrySub                           pin ;
+ALUNotLoad                            pin ;
+ALUShiftMid                           pin ;
+ALUShiftHighControl2..ALUShiftHighControl0  pin ;
+ALUShiftLow1..ALUShiftLow0            pin ;
+ALUSelectShift                        pin ;
+ALUSignZeroMask                       pin ;
+ALUCarryOverflowMask                  pin ;
+ALULoadFlags                          pin ;
+ALUSetCarry                           pin ;
+ALUHold                               pin ;
+
+" Data access stuff
+DAUPostSelect                         pin ;
+DAUIncDecControl                      pin ;
+DAUAddressSourceControl1              pin ;
+DAUAddressSourceControl0              pin ;
+DAUOffsetSourceControl                pin ;
+DAUChangeX                            pin ;
+DAUChangeS                            pin ;
+
+" Program Access signals
+PAUProgramControl2..PAUProgramControl0 pin ;
+PAULoad0                               pin ;
+
+
+" PAU offset - 0 takes it from the instruction (immediate addressing), 
+"              1 is from DataDB (absolute addressing)
+ControlSelectDataBusPAU               pin;
+
+" DataDB Control Signals
+
+" 00 for accumulator, 01 For X register
+" 10 For S register, 11 for Instruction Reg 7..0
+
+ControlDataBus1                       pin;
+ControlDataBus0                       pin;
+
+" ALU Data Input Signals
+" 10 for s reg, 11 for immediate (ProgramAB)
+" 00 for Datadb, 01 for x reg
+
+ControlALUDataInput1                  pin;
+ControlALUDataInput0                  pin;
+
+
+" Control Control signals
+" Write Signals signify writing to data data Buses
+" Read Signals signify reading from the data data Bus
+
+ControlWriteSignal                    pin ;
+ControlIOSignal                       pin ;
+ControlReadSignal                     pin ;
+
+
+InstructionReg15..InstructionReg0     pin ISTYPE 'REG, KEEP';
+
+StateBit5..StateBit0                  pin ISTYPE 'REG, KEEP';
+
+
+"Clock Input
+Clock               pin;   " Clock
+
+" Reset
+Reset               pin;   " Reset - Note it's active low
+
+" Intermediate Nodes                      
+HoldIR                                node;
+
+" Buses
+InstructionBus = [Instruction15..Instruction0];
+
+InstructionReg = [InstructionReg15..InstructionReg0];
+
+
+" The Instruction bits for the CALL and RTS instructions
+" The CALL instruction can be uniquely identified by just the first
+" 3 bits
+CallInstruct = [1, 1, 1];
+RTSInstruct = [0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0];
+
+" Responsible for the State bits
+StateBits = [StateBit5..StateBit0];
+
+
+" State Machine Bits
+" Normal signifies doing normal Instructions
+" as well as executes the first cycle in the 
+" CALL and RTS functions
+Normal = [0, 0, 0, 0, 0, 0];
+Call1  = [0, 0, 0, 0, 1, 0];
+Call2  = [0, 0, 0, 1, 0, 0];
+Call3  = [0, 0, 1, 0, 0, 0];
+RTS1  =  [0, 1, 0, 0, 0, 0];
+RTS2  =  [1, 0, 0, 0, 0, 0];
+
+
+
+EQUATIONS
+
+InstructionReg.CLK = Clock;
+InstructionReg.CLR = Reset;
+
+" Note that we hold the x
+" and s registers when we don't use them
+
+" The following are just the signals to 
+" generate the following Opcodes
+
+" Opcode: LDI
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 0, 0, 1, 0, 0, 1]) THEN {
+  " ALU controls
+  ALUFblockControl3 = 1;
+  ALUFblockControl2 = 0;
+  ALUFblockControl1 = 1;
+  ALUFblockControl0 = 0;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = 1;
+  ALUAddCarry = 0;
+  ALUCarrySub = 0;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 0;
+  ALUSetCarry = 0;
+  ControlWriteSignal = 0;
+  ControlReadSignal  = 0;
+  ControlIOSignal  = 0;
+  DAUPostSelect = .X.;
+  DAUIncDecControl = .X.;
+  DAUAddressSourceControl1 = .X.;
+  DAUAddressSourceControl0 = .X.;
+  DAUOffsetSourceControl = .X.;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+
+  " PAU signals
+  PAUProgramControl2 = 0;
+  PAUProgramControl1 = 1;
+  PAUProgramControl0 = 1;
+  PAULoad0 = 0;
+
+  "addressing_mode: 01
+  DAUAddressSourceControl1 = 0;
+  DAUAddressSourceControl0 = 1;
+  ControlALUDataInput1 = 1;
+  ControlALUDataInput0 = 1;
+}
+
+" Opcode: STD
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 1, 0, 0, 0, 0, 0]) THEN {
+  ALUFblockControl3 = .X.;
+  ALUFblockControl2 = .X.;
+  ALUFblockControl1 = .X.;
+  ALUFblockControl0 = .X.;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = .X.;
+  ALUAddCarry = .X.;
+  ALUCarrySub = .X.;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+
+
+  ControlWriteSignal = 1;
+  ControlReadSignal  = 0;
+  ControlIOSignal = 0;
+  ControlDataBus0 = 0;
+  ControlDataBus1 = 0;
+  DAUPostSelect = 0;
+  DAUIncDecControl = 0;
+  DAUOffsetSourceControl = 1;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+      "addressing_mode: 00
+  DAUAddressSourceControl1 = 0;
+  DAUAddressSourceControl0 = 0;
+  ControlSelectDataBusPAU = 0;
+}
+" Opcode: LDD
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 0, 0, 0, 0, 0, 0]) THEN {
+  ALUFblockControl3 = 1;
+  ALUFblockControl2 = 0;
+  ALUFblockControl1 = 1;
+  ALUFblockControl0 = 0;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = 1;
+  ALUAddCarry = 0;
+  ALUCarrySub = 0;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 0;
+  ALUSetCarry = 0;
+  ControlWriteSignal = 0;
+  ControlReadSignal  = 1;
+  ControlIOSignal  = 0;
+  DAUPostSelect = 0;
+  DAUIncDecControl = 0;
+  DAUAddressSourceControl1 = 0;
+  DAUAddressSourceControl0 = 0;
+  DAUOffsetSourceControl = 1;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+  DAUAddressSourceControl1 = 0;
+  DAUAddressSourceControl0 = 0;
+  PAUProgramControl2 = 0;
+  PAUProgramControl1 = 1;
+  PAUProgramControl0 = 1;
+  PAULoad0 = 0;
+    "addressing_mode: 00
+  ControlSelectDataBusPAU = 0;
+}
+
+
+" Opcode: NOP
+WHEN ([InstructionReg15..InstructionReg0] == [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0]) THEN {
+  ALUFblockControl3 = .X.;
+  ALUFblockControl2 = .X.;
+  ALUFblockControl1 = .X.;
+  ALUFblockControl0 = .X.;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = .X.;
+  ALUAddCarry = .X.;
+  ALUCarrySub = .X.;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+  PAUProgramControl2 = 0;
+  PAUProgramControl1 = 1;
+  PAUProgramControl0 = 1;
+  PAULoad0 = 0;
+  DAUPostSelect = .X.;
+  DAUIncDecControl = .X.;
+  DAUAddressSourceControl1 = .X.;
+  DAUAddressSourceControl0 = .X.;
+  DAUOffsetSourceControl = .X.;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+  ControlWriteSignal = 0;
+  ControlReadSignal  = 0;
+  ControlIOSignal  = 0;
+}
+
+" Opcode: JMP
+WHEN ([InstructionReg15..InstructionReg13] == [1, 1, 0]) THEN {
+  PAUProgramControl2 = 0;
+  PAUProgramControl1 = 0;
+  PAUProgramControl0 = 1;
+  PAULoad0 = 1;
+  DAUPostSelect = .X.;
+  DAUIncDecControl = .X.;
+  DAUAddressSourceControl1 = .X.;
+  DAUAddressSourceControl0 = .X.;
+  DAUOffsetSourceControl = .X.;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+  ALUFblockControl3 = .X.;
+  ALUFblockControl2 = .X.;
+  ALUFblockControl1 = .X.;
+  ALUFblockControl0 = .X.;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = .X.;
+  ALUAddCarry = .X.;
+  ALUCarrySub = .X.;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+  ControlSelectDataBusPAU = 0;
+}
+
+
+WHEN (([InstructionReg15..InstructionReg13] != [1, 1, 0]) & 
+([InstructionReg15..InstructionReg8] != [1, 0, 0, 0, 1, 0, 0, 0]) &
+([InstructionReg15..InstructionReg8] != [1, 0, 0, 0, 1, 1, 0, 0]) &
+([InstructionReg15..InstructionReg8] != [1, 0, 0, 0, 1, 1, 1, 1]) &
+([InstructionReg15..InstructionReg8] != [1, 0, 0, 0, 1, 0, 1, 1]) &
+([InstructionReg15..InstructionReg8] != [1, 0, 0, 1, 1, 1, 1, 1]) &
+([InstructionReg15..InstructionReg8] != [1, 0, 1, 0, 1, 1, 1, 1]) &
+([InstructionReg15..InstructionReg8] != [1, 0, 1, 1, 1, 0, 1, 1]) &
+([InstructionReg15..InstructionReg8] != [1, 0, 1, 1, 1, 0, 0, 0]) &
+([InstructionReg15..InstructionReg8] != [1, 0, 1, 0, 1, 1, 0, 0]) &
+([InstructionReg15..InstructionReg8] != [1, 0, 0, 1, 1, 1, 0, 0]) &
+([InstructionReg15..InstructionReg8] != [1, 0, 0, 1, 1, 0, 0, 0]) &
+([InstructionReg15..InstructionReg8] != [1, 0, 1, 1, 1, 1, 0, 0]) &
+([InstructionReg15..InstructionReg8] != [1, 0, 1, 0, 1, 0, 0, 0]) &
+([InstructionReg15..InstructionReg8] != [1, 0, 0, 1, 1, 0, 1, 1]) &
+([InstructionReg15..InstructionReg8] != [1, 0, 1, 1, 1, 1, 1, 1]) &
+([InstructionReg15..InstructionReg8] != [1, 0, 1, 0, 1, 0, 1, 1]) &
+([InstructionReg15..InstructionReg13] != [1, 1, 1] & (InstructionReg != RTSInstruct))
+) THEN {
+  PAUProgramControl2 = 0;
+  PAUProgramControl1 = 1;
+  PAUProgramControl0 = 1;
+  PAULoad0 = 0;
+}
+
+" Opcode: ANDI
+WHEN ([InstructionReg15..InstructionReg8] == [0, 1, 0, 0, 0, 1, 1, 1]) THEN {
+  ALUFblockControl3 = 1;
+  ALUFblockControl2 = 0;
+  ALUFblockControl1 = 0;
+  ALUFblockControl0 = 0;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = 1;
+  ALUAddCarry = 0;
+  ALUCarrySub = 0;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 1;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 0;
+  ALUSetCarry = 0;
+  
+  DAUPostSelect = .X.;
+  DAUIncDecControl = .X.;
+  DAUAddressSourceControl1 = .X.;
+  DAUAddressSourceControl0 = .X.;
+  DAUOffsetSourceControl = .X.;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+    "addressing_mode: 11
+  DAUAddressSourceControl1 = 1;
+  DAUAddressSourceControl0 = 1;
+  ControlSelectDataBusPAU = 0;
+  ControlALUDataInput1 = 1;
+  ControlALUDataInput0 = 1;
+}
+
+" Opcode: PUSHF
+WHEN ([InstructionReg15..InstructionReg0] == [0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]) THEN {
+  " 1 means predecrement
+  DAUPostSelect = 1;
+  DAUIncDecControl = 0;
+  DAUAddressSourceControl1 = 1;
+  DAUAddressSourceControl0 = 0;
+  DAUOffsetSourceControl = 1;
+  DAUChangeX = 0;
+  DAUChangeS = 1;
+  ALUFblockControl3 = 0;
+  ALUFblockControl2 = 0;
+  ALUFblockControl1 = 0;
+  ALUFblockControl0 = 0;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = 0;
+  ALUAddCarry = 0;
+  ALUCarrySub = 0;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+  ControlWriteSignal = 1;
+  ControlReadSignal  = 0;
+  ControlIOSignal  = 0;
+
+  " Selects the S Register
+  ControlDataBus1 = 0;
+  ControlDataBus0 = 1;
+}
+
+
+" Opcode: NOT
+WHEN ([InstructionReg15..InstructionReg8] == [0, 0, 1, 0, 1, 1, 0, 1]) THEN {
+  " Why this not notting
+  ALUFblockControl3 = 0;
+  ALUFblockControl2 = 0;
+  ALUFblockControl1 = 1;
+  ALUFblockControl0 = 1;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = 1;
+  ALUAddCarry = 0;
+  ALUCarrySub = 0;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 1;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 0;
+  ALUSetCarry = 0;
+  DAUPostSelect = .X.;
+  DAUIncDecControl = .X.;
+  DAUAddressSourceControl1 = .X.;
+  DAUAddressSourceControl0 = .X.;
+  DAUOffsetSourceControl = .X.;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+  PAUProgramControl2 = 0;
+  PAUProgramControl1 = 1;
+  PAUProgramControl0 = 1;
+  PAULoad0 = 0;
+    "addressing_mode: 01
+  DAUAddressSourceControl1 = 0;
+  DAUAddressSourceControl0 = 1;
+ControlSelectDataBusPAU = 0;
+}
+
+" Opcode: NEG
+WHEN ([InstructionReg15..InstructionReg0] == [0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0]) THEN {
+  ALUFblockControl3 = 0;
+  ALUFblockControl2 = 0;
+  ALUFblockControl1 = 1;
+  ALUFblockControl0 = 1;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = 1;
+  ALUAddCarry = 0;
+  ALUCarrySub = 1;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 1;
+  ALUCarryOverflowMask = 1;
+  ALUSubtract = 1;
+  ALULoadFlags = 0;
+  ALUHold = 0;
+  ALUSetCarry = 0;
+  DAUPostSelect = .X.;
+  DAUIncDecControl = .X.;
+  DAUAddressSourceControl1 = .X.;
+  DAUAddressSourceControl0 = .X.;
+  DAUOffsetSourceControl = .X.;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+  PAUProgramControl2 = 0;
+  PAUProgramControl1 = 1;
+  PAUProgramControl0 = 1;
+  PAULoad0 = 0;
+}
+
+
+" Opcode: POPF
+WHEN ([InstructionReg15..InstructionReg0] == [0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]) THEN {
+  DAUPostSelect = 0;
+  DAUIncDecControl = 1;
+  DAUAddressSourceControl1 = 1;
+  DAUAddressSourceControl0 = 0;
+  DAUOffsetSourceControl = 0;
+  DAUChangeX = 0;
+  DAUChangeS = 1;
+  ALUFblockControl3 = 1;
+  ALUFblockControl2 = 0;
+  ALUFblockControl1 = 1;
+  ALUFblockControl0 = 0;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = 1;
+  ALUAddCarry = .X.;
+  ALUCarrySub = .X.;
+  ALUSelectShift = .X.;
+  ALUSignZeroMask = 1;
+  ALUCarryOverflowMask = 1;
+  ALUSubtract = .X.;
+  ALULoadFlags = 1;
+  ALUHold = 1;
+  ALUSetCarry = .X.;
+  ControlWriteSignal = 0;
+  ControlReadSignal  = 1;
+  ControlIOSignal  = 0;
+
+  " Take from the Databus
+  ControlALUDataInput1 = 0;
+  ControlALUDataInput0 = 0;
+}
+
+
+" Opcode: INC
+WHEN ([InstructionReg15..InstructionReg0] == [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]) THEN {
+  ALUFblockControl3 = 1;
+  ALUFblockControl2 = 1;
+  ALUFblockControl1 = 0;
+  ALUFblockControl0 = 0;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = 1;
+  ALUAddCarry = 0;
+  ALUCarrySub = 1;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 1;
+  ALUCarryOverflowMask = 1;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 0;
+  ALUSetCarry = 0;
+  PAUProgramControl2 = 0;
+  PAUProgramControl1 = 1;
+  PAUProgramControl0 = 1;
+  PAULoad0 = 0;
+  DAUPostSelect = .X.;
+  DAUIncDecControl = .X.;
+  DAUAddressSourceControl1 = .X.;
+  DAUAddressSourceControl0 = .X.;
+  DAUOffsetSourceControl = .X.;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+  PAUProgramControl2 = 0;
+  PAUProgramControl1 = 1;
+  PAUProgramControl0 = 1;
+  PAULoad0 = 0;
+    "addressing_mode: 00
+  DAUAddressSourceControl1 = 0;
+  DAUAddressSourceControl0 = 0;
+  ControlSelectDataBusPAU = 0;
+}
+
+
+" Opcode: DEC
+WHEN ([InstructionReg15..InstructionReg0] == [0, 1, 1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0]) THEN {
+  ALUFblockControl3 = 1;
+  ALUFblockControl2 = 1;
+  ALUFblockControl1 = 1;
+  ALUFblockControl0 = 1;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = 0;
+  ALUAddCarry = 0;
+  ALUCarrySub = 0;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 1;
+  ALUCarryOverflowMask = 1;
+  ALUSubtract = 1;
+  ALULoadFlags = 0;
+  ALUHold = 0;
+  ALUSetCarry = 0;
+  DAUPostSelect = .X.;
+  DAUIncDecControl = .X.;
+  DAUAddressSourceControl1 = .X.;
+  DAUAddressSourceControl0 = .X.;
+  DAUOffsetSourceControl = .X.;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+    "addressing_mode: 11
+  DAUAddressSourceControl1 = 1;
+  DAUAddressSourceControl0 = 1;
+  ControlSelectDataBusPAU = 0;
+}
+
+" Opcode: LSL
+WHEN ([InstructionReg15..InstructionReg8] == [0, 1, 0, 1, 1, 0, 0, 0]) THEN {
+  ALUFblockControl3 = 1;
+  ALUFblockControl2 = 1;
+  ALUFblockControl1 = 0;
+  ALUFblockControl0 = 0;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = 0;
+  ALUAddCarry = 0;
+  ALUCarrySub = 0;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 1;
+  ALUCarryOverflowMask = 1;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 0;
+  ALUSetCarry = 0;
+  PAUProgramControl2 = 0;
+  PAUProgramControl1 = 1;
+  PAUProgramControl0 = 1;
+  PAULoad0 = 0;
+  DAUPostSelect = .X.;
+  DAUIncDecControl = .X.;
+  DAUAddressSourceControl1 = .X.;
+  DAUAddressSourceControl0 = .X.;
+  DAUOffsetSourceControl = .X.;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+  PAUProgramControl2 = 0;
+  PAUProgramControl1 = 1;
+  PAUProgramControl0 = 1;
+  PAULoad0 = 0;
+    "addressing_mode: 00
+  DAUAddressSourceControl1 = 0;
+  DAUAddressSourceControl0 = 0;
+  ControlSelectDataBusPAU = 0;
+}
+
+
+" Opcode: RLC
+WHEN ([InstructionReg15..InstructionReg8] == [0, 1, 0, 1, 0, 0, 0, 0]) THEN {
+  ALUFblockControl3 = 1;
+  ALUFblockControl2 = 1;
+  ALUFblockControl1 = 0;
+  ALUFblockControl0 = 0;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = 0;
+  ALUAddCarry = 1;
+  ALUCarrySub = 0;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 1;
+  ALUCarryOverflowMask = 1;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 0;
+  ALUSetCarry = 0;
+  PAUProgramControl2 = 0;
+  PAUProgramControl1 = 1;
+  PAUProgramControl0 = 1;
+  PAULoad0 = 0;
+  DAUPostSelect = .X.;
+  DAUIncDecControl = .X.;
+  DAUAddressSourceControl1 = .X.;
+  DAUAddressSourceControl0 = .X.;
+  DAUOffsetSourceControl = .X.;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+    "addressing_mode: 00
+  DAUAddressSourceControl1 = 0;
+  DAUAddressSourceControl0 = 0;
+ControlSelectDataBusPAU = 0;
+}
+
+" Opcode: cmp
+WHEN ([InstructionReg15..InstructionReg10] == [0, 0, 1, 1, 0, 0]) THEN {
+  ALUFblockControl3 = 0;
+  ALUFblockControl2 = 1;
+  ALUFblockControl1 = 0;
+  ALUFblockControl0 = 1;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = 0;
+  ALUAddCarry = 0;
+  ALUCarrySub = 1;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 1;
+  ALUCarryOverflowMask = 1;
+  ALUSubtract = 1;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+
+  ControlSelectDataBusPAU = 0;
+  DAUPostSelect = 0;
+  DAUIncDecControl = .X.;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+  
+  " Absolute addr
+  WHEN (([InstructionReg9, InstructionReg8] == [0,0]) & ([InstructionReg15..InstructionReg10] == [0, 0, 1, 1, 0, 0])) THEN {
+    DAUOffsetSourceControl = 1;
+    ControlALUDataInput1 = 0;
+    ControlALUDataInput0 = 0;
+    
+    DAUAddressSourceControl1 = 0;
+    DAUAddressSourceControl0 = 0;
+
+    ControlReadSignal = 1;
+
+  }
+
+  " X addr
+  WHEN (([InstructionReg9, InstructionReg8] == [0,1]) & ([InstructionReg15..InstructionReg10] == [0, 0, 1, 1, 0, 0])) THEN {
+    DAUAddressSourceControl1 = 0;
+    DAUAddressSourceControl0 = 1;
+    DAUOffsetSourceControl = 1;
+
+    ControlReadSignal = 1;
+    ControlALUDataInput1 = 0;
+    ControlALUDataInput0 = 0;
+  }
+
+  " S addr
+  WHEN (([InstructionReg9, InstructionReg8] == [1,0]) & ([InstructionReg15..InstructionReg10] == [0, 0, 1, 1, 0, 0])) THEN {
+    DAUAddressSourceControl1 = 1;
+    DAUAddressSourceControl0 = 0;
+    DAUOffsetSourceControl = 1;
+
+    ControlReadSignal = 1;
+    ControlALUDataInput1 = 0;
+    ControlALUDataInput0 = 0;
+  }
+
+  " immediate
+  WHEN (([InstructionReg9, InstructionReg8] == [1,1]) & ([InstructionReg15..InstructionReg10] == [0, 0, 1, 1, 0, 0])) THEN {
+"    DAUAddressSourceControl1 = 0;
+"    DAUAddressSourceControl0 = 0;
+"    DAUOffsetSourceControl = 1;
+
+    ControlReadSignal = 0;
+    ControlALUDataInput1 = 1;
+    ControlALUDataInput0 = 1;
+  }
+}
+
+
+" Opcode: TST
+WHEN ([InstructionReg15..InstructionReg10] == [0, 1, 0, 0, 1, 1]) THEN {
+ALUFblockControl3 = 1;
+  ALUFblockControl2 = 0;
+  ALUFblockControl1 = 0;
+  ALUFblockControl0 = 0;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = 1;
+  ALUAddCarry = 0;
+  ALUCarrySub = 0;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 1;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+
+  ControlSelectDataBusPAU = 0;
+  DAUPostSelect = 0;
+  DAUIncDecControl = .X.;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+  
+  " Absolute addr
+  WHEN (([InstructionReg9, InstructionReg8] == [0,0]) & ([InstructionReg15..InstructionReg10] == [0, 1, 0, 0, 1, 1])) THEN {
+    DAUOffsetSourceControl = 1;
+    ControlALUDataInput1 = 0;
+    ControlALUDataInput0 = 0;
+    
+    DAUAddressSourceControl1 = 0;
+    DAUAddressSourceControl0 = 0;
+
+    ControlReadSignal = 1;
+
+  }
+
+  " X addr
+  WHEN (([InstructionReg9, InstructionReg8] == [0,1]) & ([InstructionReg15..InstructionReg10] == [0, 1, 0, 0, 1, 1])) THEN {
+    DAUAddressSourceControl1 = 0;
+    DAUAddressSourceControl0 = 1;
+    DAUOffsetSourceControl = 1;
+
+    ControlReadSignal = 1;
+    ControlALUDataInput1 = 0;
+    ControlALUDataInput0 = 0;
+  }
+
+  " S addr
+  WHEN (([InstructionReg9, InstructionReg8] == [1,0]) & ([InstructionReg15..InstructionReg10] == [0, 1, 0, 0, 1, 1])) THEN {
+    DAUAddressSourceControl1 = 1;
+    DAUAddressSourceControl0 = 0;
+    DAUOffsetSourceControl = 1;
+
+    ControlReadSignal = 1;
+    ControlALUDataInput1 = 0;
+    ControlALUDataInput0 = 0;
+  }
+
+  " immediate
+  WHEN (([InstructionReg9, InstructionReg8] == [1,1]) & ([InstructionReg15..InstructionReg10] == [0, 1, 0, 0, 1, 1])) THEN {
+
+    ControlReadSignal = 0;
+    ControlALUDataInput1 = 1;
+    ControlALUDataInput0 = 1;
+  }
+}
+
+" OpCode: AND 
+WHEN ([InstructionReg15..InstructionReg10] == [0, 1, 0, 0, 0, 1]) THEN {
+  ALUFblockControl3 = 1;
+  ALUFblockControl2 = 0;
+  ALUFblockControl1 = 0;
+  ALUFblockControl0 = 0;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = 1;
+  ALUAddCarry = 0;
+  ALUCarrySub = 0;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 1;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 0;
+  ALUSetCarry = 0;
+
+  ControlSelectDataBusPAU = 0;
+  DAUPostSelect = 0;
+  DAUIncDecControl = .X.;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+  
+  " Absolute addr
+  WHEN (([InstructionReg9, InstructionReg8] == [0,0]) & ([InstructionReg15..InstructionReg10] == [0, 1, 0, 0, 0, 1])) THEN {
+    DAUOffsetSourceControl = 1;
+    ControlALUDataInput1 = 0;
+    ControlALUDataInput0 = 0;
+    
+    DAUAddressSourceControl1 = 0;
+    DAUAddressSourceControl0 = 0;
+
+    ControlReadSignal = 1;
+
+  }
+
+  " X addr
+  WHEN (([InstructionReg9, InstructionReg8] == [0,1]) & ([InstructionReg15..InstructionReg10] == [0, 1, 0, 0, 0, 1])) THEN {
+    DAUAddressSourceControl1 = 0;
+    DAUAddressSourceControl0 = 1;
+    DAUOffsetSourceControl = 1;
+
+    ControlReadSignal = 1;
+    ControlALUDataInput1 = 0;
+    ControlALUDataInput0 = 0;
+  }
+
+  " S addr
+  WHEN (([InstructionReg9, InstructionReg8] == [1,0]) & ([InstructionReg15..InstructionReg10] == [0, 1, 0, 0, 0, 1])) THEN {
+    DAUAddressSourceControl1 = 1;
+    DAUAddressSourceControl0 = 0;
+    DAUOffsetSourceControl = 1;
+
+    ControlReadSignal = 1;
+    ControlALUDataInput1 = 0;
+    ControlALUDataInput0 = 0;
+  }
+
+  " immediate
+  WHEN (([InstructionReg9, InstructionReg8] == [1,1]) & ([InstructionReg15..InstructionReg10] == [0, 1, 0, 0, 0, 1])) THEN {
+
+    ControlReadSignal = 0;
+    ControlALUDataInput1 = 1;
+    ControlALUDataInput0 = 1;
+  }
+}
+
+" OpCode: XOR 
+WHEN ([InstructionReg15..InstructionReg10] == [0, 0, 1, 1, 0, 1]) THEN {
+  ALUFblockControl3 = 0;
+  ALUFblockControl2 = 1;
+  ALUFblockControl1 = 1;
+  ALUFblockControl0 = 0;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = 1;
+  ALUAddCarry = 0;
+  ALUCarrySub = 0;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 1;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 0;
+  ALUSetCarry = 0;
+
+  ControlSelectDataBusPAU = 0;
+  DAUPostSelect = 0;
+  DAUIncDecControl = .X.;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+  
+  " Absolute addr
+  WHEN (([InstructionReg9, InstructionReg8] == [0,0]) & ([InstructionReg15..InstructionReg10] == [0, 0, 1, 1, 0, 1])) THEN {
+    DAUOffsetSourceControl = 1;
+    ControlALUDataInput1 = 0;
+    ControlALUDataInput0 = 0;
+    
+    DAUAddressSourceControl1 = 0;
+    DAUAddressSourceControl0 = 0;
+
+    ControlReadSignal = 1;
+
+  }
+
+  " X addr
+  WHEN (([InstructionReg9, InstructionReg8] == [0,1]) & ([InstructionReg15..InstructionReg10] == [0, 0, 1, 1, 0, 1])) THEN {
+    DAUAddressSourceControl1 = 0;
+    DAUAddressSourceControl0 = 1;
+    DAUOffsetSourceControl = 1;
+
+    ControlReadSignal = 1;
+    ControlALUDataInput1 = 0;
+    ControlALUDataInput0 = 0;
+  }
+
+  " S addr
+  WHEN (([InstructionReg9, InstructionReg8] == [1,0]) & ([InstructionReg15..InstructionReg10] == [0, 0, 1, 1, 0, 1])) THEN {
+    DAUAddressSourceControl1 = 1;
+    DAUAddressSourceControl0 = 0;
+    DAUOffsetSourceControl = 1;
+
+    ControlReadSignal = 1;
+    ControlALUDataInput1 = 0;
+    ControlALUDataInput0 = 0;
+  }
+
+  " immediate
+  WHEN (([InstructionReg9, InstructionReg8] == [1,1]) & ([InstructionReg15..InstructionReg10] == [0, 0, 1, 1, 0, 1])) THEN {
+
+    ControlReadSignal = 0;
+    ControlALUDataInput1 = 1;
+    ControlALUDataInput0 = 1;
+  }
+}
+
+
+" OpCode: OR 
+WHEN ([InstructionReg15..InstructionReg10] == [0, 1, 1, 1, 0, 1]) THEN {
+  ALUFblockControl3 = 1;
+  ALUFblockControl2 = 1;
+  ALUFblockControl1 = 1;
+  ALUFblockControl0 = 0;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = 1;
+  ALUAddCarry = 0;
+  ALUCarrySub = 0;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 1;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 0;
+  ALUSetCarry = 0;
+
+  ControlSelectDataBusPAU = 0;
+  DAUPostSelect = 0;
+  DAUIncDecControl = .X.;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+  
+  " Absolute addr
+  WHEN (([InstructionReg9, InstructionReg8] == [0,0]) & ([InstructionReg15..InstructionReg10] == [0, 1, 1, 1, 0, 1])) THEN {
+    DAUOffsetSourceControl = 1;
+    ControlALUDataInput1 = 0;
+    ControlALUDataInput0 = 0;
+    
+    DAUAddressSourceControl1 = 0;
+    DAUAddressSourceControl0 = 0;
+    ControlReadSignal = 1;
+
+  }
+
+  " X addr
+  WHEN (([InstructionReg9, InstructionReg8] == [0,1]) & ([InstructionReg15..InstructionReg10] == [0, 1, 1, 1, 0, 1])) THEN {
+    DAUAddressSourceControl1 = 0;
+    DAUAddressSourceControl0 = 1;
+    DAUOffsetSourceControl = 1;
+
+    ControlReadSignal = 1;
+    ControlALUDataInput1 = 0;
+    ControlALUDataInput0 = 0;
+  }
+
+  " S addr
+  WHEN (([InstructionReg9, InstructionReg8] == [1,0]) & ([InstructionReg15..InstructionReg10] == [0, 1, 1, 1, 0, 1])) THEN {
+    DAUAddressSourceControl1 = 1;
+    DAUAddressSourceControl0 = 0;
+    DAUOffsetSourceControl = 1;
+
+    ControlReadSignal = 1;
+    ControlALUDataInput1 = 0;
+    ControlALUDataInput0 = 0;
+  }
+
+  " immediate
+  WHEN (([InstructionReg9, InstructionReg8] == [1,1]) & ([InstructionReg15..InstructionReg10] == [0, 1, 1, 1, 0, 1])) THEN {
+    ControlReadSignal = 0;
+    ControlALUDataInput1 = 1;
+    ControlALUDataInput0 = 1;
+  }
+}
+
+
+" Opcode: ADD
+WHEN ([InstructionReg15..InstructionReg10] == [0, 1, 1, 0, 1, 0]) THEN {
+  ALUFblockControl3 = 1;
+  ALUFblockControl2 = 0;
+  ALUFblockControl1 = 1;
+  ALUFblockControl0 = 0;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = 0;
+  ALUAddCarry = 0;
+  ALUCarrySub = 0;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 1;
+  ALUCarryOverflowMask = 1;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 0;
+  ALUSetCarry = 0;
+
+  ControlSelectDataBusPAU = 0;
+
+  DAUPostSelect = 0;
+  DAUIncDecControl = 0;
+  DAUAddressSourceControl1 = InstructionReg9;
+  DAUAddressSourceControl0 = InstructionReg8;
+  DAUOffsetSourceControl = 1;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+
+  WHEN (([InstructionReg9, InstructionReg8] == [1,1]) & ([InstructionReg15..InstructionReg10] == [0, 1, 1, 0, 1, 0])) THEN {
+    ControlReadSignal = 0;
+    ControlALUDataInput1 = 1;
+    ControlALUDataInput0 = 1;
+  }
+
+  WHEN (([InstructionReg9, InstructionReg8] != [1,1]) & ([InstructionReg15..InstructionReg10] == [0, 1, 1, 0, 1, 0])) THEN {
+    ControlReadSignal = 1;
+    ControlALUDataInput1 = 0;
+    ControlALUDataInput0 = 0;
+  }
+}
+
+" Opcode: SBB
+WHEN ([InstructionReg15..InstructionReg10] == [0, 0, 0, 1, 1, 0]) THEN {
+  ALUFblockControl3 = 0;
+  ALUFblockControl2 = 1;
+  ALUFblockControl1 = 0;
+  ALUFblockControl0 = 1;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = 0;
+  ALUAddCarry = 1;
+  ALUCarrySub = 1;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 1;
+  ALUCarryOverflowMask = 1;
+  ALUSubtract = 1;
+  ALULoadFlags = 0;
+  ALUHold = 0;
+  ALUSetCarry = 0;
+
+  ControlSelectDataBusPAU = 0;
+
+  " 9 - 1 8 - 0
+  
+  DAUPostSelect = .X.;
+  DAUIncDecControl = .X.;
+  DAUAddressSourceControl1 = InstructionReg9;
+  DAUAddressSourceControl0 = InstructionReg8;
+  DAUOffsetSourceControl = 1;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+  
+  WHEN (([InstructionReg9, InstructionReg8] == [1,1]) & ([InstructionReg15..InstructionReg10] == [0, 0, 0, 1, 1, 0])) THEN {
+    ControlReadSignal = 0;
+    ControlALUDataInput1 = 1;
+    ControlALUDataInput0 = 1;
+  }
+  WHEN (([InstructionReg9, InstructionReg8] != [1,1]) & ([InstructionReg15..InstructionReg10] == [0, 0, 0, 1, 1, 0])) THEN {
+    ControlReadSignal = 1;
+    ControlALUDataInput1 = 0;
+    ControlALUDataInput0 = 0;
+  }
+}
+
+
+" Opcode: SUB
+WHEN ([InstructionReg15..InstructionReg10] == [0, 0, 0, 1, 0, 0]) THEN {
+  ALUFblockControl3 = 0;
+  ALUFblockControl2 = 1;
+  ALUFblockControl1 = 0;
+  ALUFblockControl0 = 1;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = 0;
+  ALUAddCarry = 0;
+  ALUCarrySub = 1;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 1;
+  ALUCarryOverflowMask = 1;
+  ALUSubtract = 1;
+  ALULoadFlags = 0;
+  ALUHold = 0;
+  ALUSetCarry = 0;
+
+  ControlSelectDataBusPAU = 0;
+  
+  DAUPostSelect = .X.;
+  DAUIncDecControl = .X.;
+  DAUAddressSourceControl1 = InstructionReg9;
+  DAUAddressSourceControl0 = InstructionReg8;
+  DAUOffsetSourceControl = 1;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+  
+  WHEN (([InstructionReg9, InstructionReg8] == [1,1]) & ([InstructionReg15..InstructionReg10] == [0, 0, 0, 1, 0, 0])) THEN {
+    ControlReadSignal = 0;
+    ControlALUDataInput1 = 1;
+    ControlALUDataInput0 = 1;
+  }
+  WHEN (([InstructionReg9, InstructionReg8] != [1,1]) & ([InstructionReg15..InstructionReg10] == [0, 0, 0, 1, 0, 0])) THEN {
+    ControlReadSignal = 1;
+    ControlALUDataInput1 = 0;
+    ControlALUDataInput0 = 0;
+  }
+}
+
+" Opcode: ADC
+WHEN ([InstructionReg15..InstructionReg10] == [0, 1, 1, 0, 0, 0]) THEN {
+  ALUFblockControl3 = 1;
+  ALUFblockControl2 = 0;
+  ALUFblockControl1 = 1;
+  ALUFblockControl0 = 0;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = 0;
+  ALUAddCarry = 1;
+  ALUCarrySub = 0;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 1;
+  ALUCarryOverflowMask = 1;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 0;
+  ALUSetCarry = 0;
+
+
+  ControlSelectDataBusPAU = 0;
+  DAUPostSelect = .X.;
+  DAUIncDecControl = .X.;
+  DAUAddressSourceControl1 = InstructionReg9;
+  DAUAddressSourceControl0 = InstructionReg8;
+  DAUOffsetSourceControl = 1;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+  
+  WHEN (([InstructionReg9, InstructionReg8] == [1,1]) & ([InstructionReg15..InstructionReg10] == [0, 1, 1, 0, 0, 0])) THEN {
+    ControlReadSignal = 0;
+    ControlALUDataInput1 = 1;
+    ControlALUDataInput0 = 1;
+  }
+  WHEN (([InstructionReg9, InstructionReg8] != [1,1]) & ([InstructionReg15..InstructionReg10] == [0, 1, 1, 0, 0, 0])) THEN {
+    ControlReadSignal = 1;
+    ControlALUDataInput1 = 0;
+    ControlALUDataInput0 = 0;
+  }
+}
+
+" Opcode: STD
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 1, 0, 0, 0, 0, 0]) THEN {
+  ALUFblockControl3 = 0;
+  ALUFblockControl2 = 0;
+  ALUFblockControl1 = 0;
+  ALUFblockControl0 = 0;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = 0;
+  ALUAddCarry = 0;
+  ALUCarrySub = 0;
+  ALUSetCarry = 0;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  
+  ControlWriteSignal = 1;
+  ControlReadSignal  = 0;
+  ControlIOSignal = 0;
+  ControlDataBus0 = 0;
+  ControlDataBus1 = 0;
+
+  DAUPostSelect = .X.;
+  DAUIncDecControl = .X.;
+  DAUAddressSourceControl1 = .X.;
+  DAUAddressSourceControl0 = .X.;
+  DAUOffsetSourceControl = .X.;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+  
+    "addressing_mode: 00
+  DAUAddressSourceControl1 = 0;
+  DAUAddressSourceControl0 = 0;
+ControlSelectDataBusPAU = 0;
+}
+
+" Opcode: ST
+" store Accumulator indirect at (X + o)
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 1, 1, 0, 1, 1, 1]) THEN {
+  ALUFblockControl3 = 0;
+  ALUFblockControl2 = 0;
+  ALUFblockControl1 = 0;
+  ALUFblockControl0 = 0;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = 0;
+  ALUAddCarry = 0;
+  ALUCarrySub = 0;
+  ALUSetCarry = 0;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  
+  DAUPostSelect = 0;
+  DAUIncDecControl = .X.;
+  DAUAddressSourceControl1 = 0;
+  DAUAddressSourceControl0 = 1;
+  DAUOffsetSourceControl = 1;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+
+  ControlWriteSignal = 1;
+  ControlReadSignal  = 0;
+
+  ControlDataBus0 = 0;
+  ControlDataBus1 = 0;
+
+  DAUAddressSourceControl1 = 0;
+  DAUAddressSourceControl0 = 0;
+  ControlSelectDataBusPAU = 0;
+}
+
+
+" Opcode: ST
+" store Accumulator indirect at (X + o) then
+" post-increment X
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 1, 1, 0, 1, 1, 0]) THEN {
+
+  ALUFblockControl3 = 0;
+  ALUFblockControl2 = 0;
+  ALUFblockControl1 = 0;
+  ALUFblockControl0 = 0;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = 0;
+  ALUAddCarry = 0;
+  ALUCarrySub = 0;
+  ALUSetCarry = 0;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+
+  DAUOffsetSourceControl = 1; "InstructionReg9;
+  DAUAddressSourceControl1 = 0;
+  DAUAddressSourceControl0 = 1;
+  DAUPostSelect = 0;    " !InstructionReg12;
+  DAUIncDecControl =  1;" !InstructionReg11;
+  DAUChangeX = 1;
+  DAUChangeS = 0;
+
+  ControlWriteSignal = 1;
+  ControlReadSignal  = 0;
+
+  ControlDataBus0 = 0;
+  ControlDataBus1 = 0;
+    "addressing_mode: 10
+  ControlSelectDataBusPAU = 0;
+}
+
+
+" Opcode: ST
+
+" store Accumulator indirect at (X + o) then
+" post-decrement X
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 1, 1, 1, 1, 1, 0]) THEN {
+  ALUFblockControl3 = .X.;
+  ALUFblockControl2 = .X.;
+  ALUFblockControl1 = .X.;
+  ALUFblockControl0 = .X.;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = .X.;
+  ALUAddCarry = .X.;
+  ALUCarrySub = .X.;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+
+  DAUOffsetSourceControl = 1; "InstructionReg9;
+  DAUAddressSourceControl1 = 0;
+  DAUAddressSourceControl0 = 1;
+  DAUPostSelect = 0;    " !InstructionReg12;
+  DAUIncDecControl =  0;" !InstructionReg11;
+  DAUChangeX = 1;
+  DAUChangeS = 0;
+
+  ControlWriteSignal = 1;
+  ControlReadSignal  = 0;
+
+  ControlDataBus0 = 0;
+  ControlDataBus1 = 0;
+
+  PAUProgramControl2 = 0;
+  PAUProgramControl1 = 1;
+  PAUProgramControl0 = 1;
+  PAULoad0 = 0;
+    "addressing_mode: 10
+  ControlSelectDataBusPAU = 0;
+}
+" Opcode: ST
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 1, 0, 0, 1, 1, 0]) THEN {
+  ALUFblockControl3 = .X.;
+  ALUFblockControl2 = .X.;
+  ALUFblockControl1 = .X.;
+  ALUFblockControl0 = .X.;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = .X.;
+  ALUAddCarry = .X.;
+  ALUCarrySub = .X.;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+  DAUPostSelect = 1;"!InstructionReg12;
+  DAUIncDecControl = 1; "!InstructionReg11;
+  DAUOffsetSourceControl = 1; "InstructionReg9;
+  DAUAddressSourceControl1 = 0;
+  DAUAddressSourceControl0 = 1;
+  DAUChangeS = 0;
+  DAUChangeX = 1;
+
+  ControlDataBus0 = 0;
+  ControlDataBus1 = 0;
+    "addressing_mode: 10
+  ControlSelectDataBusPAU = 0;
+  ControlWriteSignal = 1;
+  ControlReadSignal  = 0;
+
+}
+
+
+
+
+" Opcode: ST
+" store Accumulator indirect at (X + o) after
+" pre-decrementing X
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 1, 0, 1, 1, 1, 0]) THEN {
+  ALUFblockControl3 = .X.;
+  ALUFblockControl2 = .X.;
+  ALUFblockControl1 = .X.;
+  ALUFblockControl0 = .X.;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = .X.;
+  ALUAddCarry = .X.;
+  ALUCarrySub = .X.;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+
+
+  DAUPostSelect = 1;"!InstructionReg12;
+  DAUIncDecControl = 0; "!InstructionReg11;
+  DAUOffsetSourceControl = 1; "InstructionReg9;
+  DAUAddressSourceControl1 = 0;
+  DAUAddressSourceControl0 = 1;
+  DAUChangeS = 0;
+  DAUChangeX = 1;
+  ControlWriteSignal = 1;
+
+  ControlDataBus0 = 0;
+  ControlDataBus1 = 0;
+    "addressing_mode: 10
+  ControlSelectDataBusPAU = 0;
+}
+" Opcode: ST
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 1, 1, 0, 0, 1, 1]) THEN {
+  ALUFblockControl3 = .X.;
+  ALUFblockControl2 = .X.;
+  ALUFblockControl1 = .X.;
+  ALUFblockControl0 = .X.;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = .X.;
+  ALUAddCarry = .X.;
+  ALUCarrySub = .X.;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+  DAUPostSelect = !InstructionReg12;
+  DAUIncDecControl = !InstructionReg11;
+  ControlWriteSignal = 1;
+  ControlReadSignal  = 0;
+DAUOffsetSourceControl = InstructionReg9;
+ControlDataBus0 = 0;
+ControlDataBus1 = 0;
+  PAUProgramControl2 = 0;
+  PAUProgramControl1 = 1;
+  PAUProgramControl0 = 1;
+  PAULoad0 = 0;
+    "addressing_mode: 11
+  DAUAddressSourceControl1 = 1;
+  DAUAddressSourceControl0 = 1;
+ControlSelectDataBusPAU = 0;
+}
+
+" store Accumulator indirect at (S + o) then
+" post-increment S
+" Opcode: ST
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 1, 1, 0, 0, 1, 0]) THEN {
+  ALUFblockControl3 = .X.;
+  ALUFblockControl2 = .X.;
+  ALUFblockControl1 = .X.;
+  ALUFblockControl0 = .X.;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = .X.;
+  ALUAddCarry = .X.;
+  ALUCarrySub = .X.;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+  
+  
+  DAUPostSelect = 0; "!InstructionReg12;
+  DAUIncDecControl = 1; "!InstructionReg11;
+  DAUOffsetSourceControl = 1; "InstructionReg9;
+  DAUAddressSourceControl1 = 1;
+  DAUAddressSourceControl0 = 0;
+  DAUChangeS = 1;
+  DAUChangeX = 0;
+  ControlWriteSignal = 1;
+
+  ControlDataBus0 = 0;
+  ControlDataBus1 = 0;
+    "addressing_mode: 10
+  ControlSelectDataBusPAU = 0;
+}
+
+" Opcode: ST
+
+" store Accumulator indirect at (S + o) then
+" post-decrement S
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 1, 1, 1, 0, 1, 0]) THEN {
+  ALUFblockControl3 = .X.;
+  ALUFblockControl2 = .X.;
+  ALUFblockControl1 = .X.;
+  ALUFblockControl0 = .X.;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = .X.;
+  ALUAddCarry = .X.;
+  ALUCarrySub = .X.;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+
+  DAUPostSelect = 0;"!InstructionReg12;
+  DAUIncDecControl = 0; "!InstructionReg11;
+  DAUOffsetSourceControl = 1; "InstructionReg9;
+  DAUAddressSourceControl1 = 1;
+  DAUAddressSourceControl0 = 0;
+  DAUChangeS = 1;
+  DAUChangeX = 0;
+  ControlWriteSignal = 1;
+
+  ControlDataBus0 = 0;
+  ControlDataBus1 = 0;
+  ControlSelectDataBusPAU = 0;
+}
+
+
+" Opcode: ST
+" store Accumulator indirect at (S + o) after
+" pre-incrementing S
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 1, 0, 0, 0, 1, 0]) THEN {
+  ALUFblockControl3 = .X.;
+  ALUFblockControl2 = .X.;
+  ALUFblockControl1 = .X.;
+  ALUFblockControl0 = .X.;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = .X.;
+  ALUAddCarry = .X.;
+  ALUCarrySub = .X.;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+
+  DAUPostSelect = 1;"!InstructionReg12;
+  DAUIncDecControl = 1; "!InstructionReg11;
+  DAUOffsetSourceControl = 1; "InstructionReg9;
+  DAUAddressSourceControl1 = 1;
+  DAUAddressSourceControl0 = 0;
+  DAUChangeS = 1;
+  DAUChangeX = 0;
+  ControlWriteSignal = 1;
+
+  ControlDataBus0 = 0;
+  ControlDataBus1 = 0;
+  ControlSelectDataBusPAU = 0;
+}
+
+" Opcode: ST
+" store Accumulator indirect at (S + o) after
+" pre-decrementing S
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 1, 0, 1, 0, 1, 0]) THEN {
+  ALUFblockControl3 = .X.;
+  ALUFblockControl2 = .X.;
+  ALUFblockControl1 = .X.;
+  ALUFblockControl0 = .X.;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = .X.;
+  ALUAddCarry = .X.;
+  ALUCarrySub = .X.;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+
+  DAUPostSelect = 1; "!InstructionReg12;
+  DAUIncDecControl = 0; "!InstructionReg11;
+  DAUOffsetSourceControl = 1; "InstructionReg9;
+  DAUAddressSourceControl1 = 1;
+  DAUAddressSourceControl0 = 0;
+  DAUChangeS = 1;
+  DAUChangeX = 0;
+  ControlWriteSignal = 1;
+
+  ControlDataBus0 = 0;
+  ControlDataBus1 = 0;
+  ControlSelectDataBusPAU = 0;
+}
+
+
+" load Accumulator indirect from (S + o) after
+" pre-decrementing S
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 0, 0, 1, 0, 1, 0]) THEN {
+  ALUFblockControl3 = 1;
+  ALUFblockControl2 = 0;
+  ALUFblockControl1 = 1;
+  ALUFblockControl0 = 0;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = 1;
+  ALUAddCarry = 0;
+  ALUCarrySub = 0;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 0;
+  ALUSetCarry = 0;
+  
+  DAUOffsetSourceControl = 1; "InstructionReg9;
+  DAUAddressSourceControl1 = 1;
+  DAUAddressSourceControl0 = 0;
+  DAUPostSelect = 1;    " !InstructionReg12;
+  DAUIncDecControl =  0;" !InstructionReg11;
+  DAUChangeX = 0;
+  DAUChangeS = 1;
+
+  ControlWriteSignal = 0;
+  ControlReadSignal  = 1;
+
+  "addressing_mode: 10
+  ControlSelectDataBusPAU = 0;
+}
+
+
+
+" Opcode: LD
+" load Accumulator indirect from (S + o) then
+" post-decrement S
+
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 0, 1, 1, 0, 1, 0]) THEN {
+  ALUFblockControl3 = 0;
+  ALUFblockControl2 = 1;
+  ALUFblockControl1 = 1;
+  ALUFblockControl0 = 0;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = 1;
+  ALUAddCarry = 0;
+  ALUCarrySub = 0;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 0;
+  ALUSetCarry = 0;
+
+  DAUPostSelect = 0; "!InstructionReg12;
+  DAUIncDecControl = 0; "!InstructionReg11;
+  DAUOffsetSourceControl = 1; "InstructionReg9;
+  DAUAddressSourceControl1 = 1;
+  DAUAddressSourceControl0 = 0;
+  DAUChangeS = 1;
+  DAUChangeX = 0;
+
+  ControlReadSignal = 1;
+  ControlWriteSignal = 0;
+  ControlDataBus0 = 0;
+  ControlDataBus1 = 0;  
+  ControlSelectDataBusPAU = 0;
+}
+
+
+" Opcode: LD
+" load Accumulator indirect from (X + o) then
+" post-increment X
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 0, 1, 0, 1, 1, 0]) THEN {
+  ALUFblockControl3 = 0;
+  ALUFblockControl2 = 1;
+  ALUFblockControl1 = 1;
+  ALUFblockControl0 = 0;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = 1;
+  ALUAddCarry = 0;
+  ALUCarrySub = 0;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 0;
+  ALUSetCarry = 0;
+
+  DAUPostSelect = 0; "!InstructionReg12;
+  DAUIncDecControl = 1; "!InstructionReg11;
+  DAUOffsetSourceControl = 1; "InstructionReg9;
+  DAUAddressSourceControl1 = 0;
+  DAUAddressSourceControl0 = 1;
+  DAUChangeS = 0;
+  DAUChangeX = 1;
+
+  ControlReadSignal = 1;
+  ControlWriteSignal = 0;
+  ControlDataBus0 = 0;
+  ControlDataBus1 = 0;  
+  ControlSelectDataBusPAU = 0;
+}
+
+
+" Opcode: LD
+" load Accumulator indirect from (S + o) then
+" post-increment S
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 0, 1, 0, 0, 1, 0]) THEN {
+  ALUFblockControl3 = 0;
+  ALUFblockControl2 = 1;
+  ALUFblockControl1 = 1;
+  ALUFblockControl0 = 0;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = 1;
+  ALUAddCarry = 0;
+  ALUCarrySub = 0;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 0;
+  ALUSetCarry = 0;
+
+  DAUPostSelect = 0; "!InstructionReg12;
+  DAUIncDecControl = 1; "!InstructionReg11;
+  DAUOffsetSourceControl = 1; "InstructionReg9;
+  DAUAddressSourceControl1 = 1;
+  DAUAddressSourceControl0 = 0;
+  DAUChangeS = 1;
+  DAUChangeX = 0;
+
+  ControlReadSignal = 1;
+  ControlWriteSignal = 0;
+  ControlDataBus0 = 0;
+  ControlDataBus1 = 0;  
+  ControlSelectDataBusPAU = 0;
+}
+
+
+" Opcode: LD
+" load Accumulator indirect from (X + o) then
+" post-decrement X
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 0, 1, 1, 1, 1, 0]) THEN {
+  ALUFblockControl3 = 1;
+  ALUFblockControl2 = 0;
+  ALUFblockControl1 = 1;
+  ALUFblockControl0 = 0;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = 1;
+  ALUAddCarry = 0;
+  ALUCarrySub = 0;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 0;
+  ALUSetCarry = 0;
+
+  DAUPostSelect = 0; "!InstructionReg12;
+  DAUIncDecControl = 0; "!InstructionReg11;
+  DAUOffsetSourceControl = 1; "InstructionReg9;
+  DAUAddressSourceControl1 = 0;
+  DAUAddressSourceControl0 = 1;
+  DAUChangeS = 0;
+  DAUChangeX = 1;
+  ControlWriteSignal = 0;
+  ControlReadSignal = 1;
+
+  ControlDataBus0 = 0;
+  ControlDataBus1 = 0;  
+  ControlSelectDataBusPAU = 0;
+}
+
+
+
+
+" Opcode: LD
+" load Accumulator indirect from (X + o) after
+" pre-decrementing X
+
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 0, 0, 1, 1, 1, 0]) THEN {
+  ALUFblockControl3 = 1;
+  ALUFblockControl2 = 0;
+  ALUFblockControl1 = 1;
+  ALUFblockControl0 = 0;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = 1;
+  ALUAddCarry = 0;
+  ALUCarrySub = 0;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 0;
+  ALUSetCarry = 0;
+  
+  DAUOffsetSourceControl = 1; "InstructionReg9;
+  DAUAddressSourceControl1 = 0;
+  DAUAddressSourceControl0 = 1;
+  DAUPostSelect = 1;    " !InstructionReg12;
+  DAUIncDecControl =  0;" !InstructionReg11;
+  DAUChangeX = 1;
+  DAUChangeS = 0;
+
+  ControlWriteSignal = 0;
+  ControlReadSignal  = 1;
+
+  "addressing_mode: 10
+  ControlSelectDataBusPAU = 0;
+}
+
+
+
+" Opcode: LD
+" load Accumulator indirect from (X + o) after
+" pre-incrementing X
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 0, 0, 0, 1, 1, 0]) THEN {
+  ALUFblockControl3 = 1;
+  ALUFblockControl2 = 0;
+  ALUFblockControl1 = 1;
+  ALUFblockControl0 = 0;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = 1;
+  ALUAddCarry = 0;
+  ALUCarrySub = 0;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 0;
+  ALUSetCarry = 0;
+  
+  DAUOffsetSourceControl = 1; "InstructionReg9;
+  DAUAddressSourceControl1 = 0;
+  DAUAddressSourceControl0 = 1;
+  DAUPostSelect = 1;    " !InstructionReg12;
+  DAUIncDecControl =  1;" !InstructionReg11;
+  DAUChangeX = 1;
+  DAUChangeS = 0;
+
+  ControlWriteSignal = 0;
+  ControlReadSignal  = 1;
+
+  "addressing_mode: 10
+  ControlSelectDataBusPAU = 0;
+}
+
+
+
+" Opcode: LD
+" load Accumulator indirect from (S + o) after
+" pre-incrementing S
+
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 0, 0, 0, 0, 1, 0]) THEN {
+  ALUFblockControl3 = 1;
+  ALUFblockControl2 = 0;
+  ALUFblockControl1 = 1;
+  ALUFblockControl0 = 0;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = 1;
+  ALUAddCarry = 0;
+  ALUCarrySub = 0;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 0;
+  ALUSetCarry = 0;
+  
+  DAUOffsetSourceControl = 1; "InstructionReg9;
+  DAUAddressSourceControl1 = 1;
+  DAUAddressSourceControl0 = 0;
+  DAUPostSelect = 1;    " !InstructionReg12;
+  DAUIncDecControl =  1;" !InstructionReg11;
+  DAUChangeX = 0;
+  DAUChangeS = 1;
+
+  ControlWriteSignal = 0;
+  ControlReadSignal  = 1;
+
+  "addressing_mode: 10
+  ControlSelectDataBusPAU = 0;
+}
+
+" Opcode: LD
+" load Accumulator indirect from (X + o)
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 0, 1, 0, 1, 1, 1]) THEN {
+  ALUFblockControl3 = 1;
+  ALUFblockControl2 = 0;
+  ALUFblockControl1 = 1;
+  ALUFblockControl0 = 0;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = 1;
+  ALUAddCarry = 0;
+  ALUCarrySub = 0;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 0;
+  ALUSetCarry = 0;
+  
+  DAUOffsetSourceControl = 1; "InstructionReg9;
+  DAUAddressSourceControl1 = 0;
+  DAUAddressSourceControl0 = 1;
+  DAUPostSelect = 0;    " !InstructionReg12;
+  DAUIncDecControl =  1;" !InstructionReg11;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+
+  ControlWriteSignal = 0;
+  ControlReadSignal  = 1;
+
+  "addressing_mode: 10
+  ControlSelectDataBusPAU = 0;
+}
+
+
+
+" Opcode: LD
+" load Accumulator indirect from (X + o)
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 0, 1, 0, 0, 1, 1]) THEN {
+  ALUFblockControl3 = 1;
+  ALUFblockControl2 = 0;
+  ALUFblockControl1 = 1;
+  ALUFblockControl0 = 0;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = 1;
+  ALUAddCarry = 0;
+  ALUCarrySub = 0;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 0;
+  ALUSetCarry = 0;
+  
+  DAUOffsetSourceControl = 1; "InstructionReg9;
+  DAUAddressSourceControl1 = 1;
+  DAUAddressSourceControl0 = 0;
+  DAUPostSelect = 0;    " !InstructionReg12;
+  DAUIncDecControl =  1;" !InstructionReg11;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+
+  ControlWriteSignal = 0;
+  ControlReadSignal  = 1;
+
+  "addressing_mode: 10
+  ControlSelectDataBusPAU = 0;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+" Jump Instructions 
+" Opcode: JA
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 0, 0, 1, 0, 0, 0]) THEN {
+  ALUFblockControl3 = .X.;
+  ALUFblockControl2 = .X.;
+  ALUFblockControl1 = .X.;
+  ALUFblockControl0 = .X.;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = .X.;
+  ALUAddCarry = .X.;
+  ALUCarrySub = .X.;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+  DAUPostSelect = .X.;
+  DAUIncDecControl = .X.;
+  DAUAddressSourceControl1 = .X.;
+  DAUAddressSourceControl0 = .X.;
+  DAUOffsetSourceControl = .X.;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+  PAUProgramControl2 = 0; "(!Flag3 & !Flag0 & 0) # (0 & !(!Flag3 # !Flag0));
+  PAUProgramControl1 = 1; " (!Flag3 & !Flag0 & 1) # (1 & !(!Flag3 # !Flag0));
+  PAUProgramControl0 = !(!Flag3 & !Flag0); " (!Flag3 & !Flag0 & 0) # (1 & !(!Flag3 # !Flag0));
+  PAULoad0 = 0; "(!Flag3 & !Flag0 & 0) # (0 & !(!Flag3 # !Flag0));
+}
+
+" Opcode: JAE
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 0, 0, 1, 1, 0, 0]) THEN {
+  ALUFblockControl3 = .X.;
+  ALUFblockControl2 = .X.;
+  ALUFblockControl1 = .X.;
+  ALUFblockControl0 = .X.;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = .X.;
+  ALUAddCarry = .X.;
+  ALUCarrySub = .X.;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+  DAUPostSelect = .X.;
+  DAUIncDecControl = .X.;
+  DAUAddressSourceControl1 = .X.;
+  DAUAddressSourceControl0 = .X.;
+  DAUOffsetSourceControl = .X.;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+  PAUProgramControl2 = 0; "(!Flag3 & 0) # (0 & Flag3);
+  PAUProgramControl1 = 1; "(!Flag3 & 1) # (1 & Flag3);
+  PAUProgramControl0 = Flag3; " (!Flag3 & 0) # (1 & Flag3);
+  PAULoad0 = 0; "(!Flag3 & 0) # (0 & Flag3);
+}
+
+" Opcode: JB
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 0, 0, 1, 1, 1, 1]) THEN {
+  ALUFblockControl3 = .X.;
+  ALUFblockControl2 = .X.;
+  ALUFblockControl1 = .X.;
+  ALUFblockControl0 = .X.;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = .X.;
+  ALUAddCarry = .X.;
+  ALUCarrySub = .X.;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+  DAUPostSelect = .X.;
+  DAUIncDecControl = .X.;
+  DAUAddressSourceControl1 = .X.;
+  DAUAddressSourceControl0 = .X.;
+  DAUOffsetSourceControl = .X.;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+  PAUProgramControl2 = 0; "(Flag3 & 0) # (0 & !Flag3);
+  PAUProgramControl1 = 1; "(Flag3 & 1) # (1 & !Flag3);
+  PAUProgramControl0 = !Flag3; "(Flag3 & 0) # (1 & !Flag3);
+  PAULoad0 = (Flag3 & 0) # (0 & !Flag3);
+}
+
+" Opcode: JBE
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 0, 0, 1, 0, 1, 1]) THEN {
+  ALUFblockControl3 = .X.;
+  ALUFblockControl2 = .X.;
+  ALUFblockControl1 = .X.;
+  ALUFblockControl0 = .X.;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = .X.;
+  ALUAddCarry = .X.;
+  ALUCarrySub = .X.;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+  DAUPostSelect = .X.;
+  DAUIncDecControl = .X.;
+  DAUAddressSourceControl1 = .X.;
+  DAUAddressSourceControl0 = .X.;
+  DAUOffsetSourceControl = .X.;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+  PAUProgramControl2 = 0; "(Flag3 # Flag0 & 0) # (0 & !(Flag3 # Flag0));
+  PAUProgramControl1 = 1; "(Flag3 # Flag0 & 1) # (1 & !(Flag3 # Flag0));
+  PAUProgramControl0 = !(Flag3 # Flag0);  "(Flag3 # Flag0 & 0) # (1 & !(Flag3 # Flag0));
+  PAULoad0 = 0; "(Flag3 # Flag0 & 0) # (0 & !(Flag3 # Flag0));
+}
+
+" Opcode: JE
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 0, 1, 1, 1, 1, 1]) THEN {
+  ALUFblockControl3 = .X.;
+  ALUFblockControl2 = .X.;
+  ALUFblockControl1 = .X.;
+  ALUFblockControl0 = .X.;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = .X.;
+  ALUAddCarry = .X.;
+  ALUCarrySub = .X.;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+  DAUPostSelect = .X.;
+  DAUIncDecControl = .X.;
+  DAUAddressSourceControl1 = .X.;
+  DAUAddressSourceControl0 = .X.;
+  DAUOffsetSourceControl = .X.;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+  PAUProgramControl2 = 0; "(Flag0 & 0) # (0 & !Flag0);
+  PAUProgramControl1 = 1; "(Flag0 & 1) # (1 & !Flag0);
+  PAUProgramControl0 = (Flag0 & 0) # (1 & !Flag0);
+  PAULoad0 = (Flag0 & 0) # (0 & !Flag0);
+}
+
+" Opcode: JG
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 1, 0, 1, 1, 1, 1]) THEN {
+  ALUFblockControl3 = .X.;
+  ALUFblockControl2 = .X.;
+  ALUFblockControl1 = .X.;
+  ALUFblockControl0 = .X.;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = .X.;
+  ALUAddCarry = .X.;
+  ALUCarrySub = .X.;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+  DAUPostSelect = .X.;
+  DAUIncDecControl = .X.;
+  DAUAddressSourceControl1 = .X.;
+  DAUAddressSourceControl0 = .X.;
+  DAUOffsetSourceControl = .X.;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+  PAUProgramControl2 = 0; 
+  PAUProgramControl1 = 1; 
+  PAUProgramControl0 = !( ( (!Flag1 & !Flag2) # (Flag1 & Flag2)) & !Flag0); 
+  PAULoad0 = 0;
+}
+
+" Opcode: JGE
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 1, 1, 1, 0, 1, 1]) THEN {
+  ALUFblockControl3 = .X.;
+  ALUFblockControl2 = .X.;
+  ALUFblockControl1 = .X.;
+  ALUFblockControl0 = .X.;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = .X.;
+  ALUAddCarry = .X.;
+  ALUCarrySub = .X.;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+  DAUPostSelect = .X.;
+  DAUIncDecControl = .X.;
+  DAUAddressSourceControl1 = .X.;
+  DAUAddressSourceControl0 = .X.;
+  DAUOffsetSourceControl = .X.;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+  PAUProgramControl2 = 0;
+  PAUProgramControl1 = 1; 
+  PAUProgramControl0 = !( (!Flag1 & !Flag2) # (Flag1 & Flag2)); 
+  PAULoad0 = 0; "(((Flag1 == Flag2) & Flag0) & 0) # (0 & !((Flag1 == Flag2) & Flag0));
+}
+
+" Opcode: JL
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 1, 1, 1, 0, 0, 0]) THEN {
+  ALUFblockControl3 = .X.;
+  ALUFblockControl2 = .X.;
+  ALUFblockControl1 = .X.;
+  ALUFblockControl0 = .X.;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = .X.;
+  ALUAddCarry = .X.;
+  ALUCarrySub = .X.;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+  DAUPostSelect = .X.;
+  DAUIncDecControl = .X.;
+  DAUAddressSourceControl1 = .X.;
+  DAUAddressSourceControl0 = .X.;
+  DAUOffsetSourceControl = .X.;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+  PAUProgramControl2 = 0; "((Flag1 != Flag2) & 0) # (0 & !(Flag1 != Flag2));
+  PAUProgramControl1 = 1; "((Flag1 != Flag2) & 1) # (1 & !(Flag1 != Flag2));
+  PAUProgramControl0 = ((Flag1 != Flag2) & 0) # (1 & !(Flag1 != Flag2));
+  PAULoad0 = 0; "((Flag1 != Flag2) & 0) # (0 & !(Flag1 != Flag2));
+}
+
+" Opcode: JLE
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 1, 0, 1, 1, 0, 0]) THEN {
+  ALUFblockControl3 = .X.;
+  ALUFblockControl2 = .X.;
+  ALUFblockControl1 = .X.;
+  ALUFblockControl0 = .X.;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = .X.;
+  ALUAddCarry = .X.;
+  ALUCarrySub = .X.;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+  DAUPostSelect = .X.;
+  DAUIncDecControl = .X.;
+  DAUAddressSourceControl1 = .X.;
+  DAUAddressSourceControl0 = .X.;
+  DAUOffsetSourceControl = .X.;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+  PAUProgramControl2 = 0; "(((Flag1 != Flag2) # Flag0) & 0) # (0 & !((Flag1 != Flag2) # Flag0));
+  PAUProgramControl1 = 1; "(((Flag1 != Flag2) # Flag0) & 1) # (1 & !((Flag1 != Flag2) # Flag0));
+  PAUProgramControl0 = (((Flag1 != Flag2) # Flag0) & 0) # (1 & !((Flag1 != Flag2) # Flag0));
+  PAULoad0 = 0; "(((Flag1 != Flag2) # Flag0) & 0) # (0 & !((Flag1 != Flag2) # Flag0));
+}
+
+" Opcode: JNE
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 0, 1, 1, 1, 0, 0]) THEN {
+  ALUFblockControl3 = .X.;
+  ALUFblockControl2 = .X.;
+  ALUFblockControl1 = .X.;
+  ALUFblockControl0 = .X.;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = .X.;
+  ALUAddCarry = .X.;
+  ALUCarrySub = .X.;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+  DAUPostSelect = .X.;
+  DAUIncDecControl = .X.;
+  DAUAddressSourceControl1 = .X.;
+  DAUAddressSourceControl0 = .X.;
+  DAUOffsetSourceControl = .X.;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+  PAUProgramControl2 = 0; "(!Flag0 & 0) # (0 & Flag0);
+  PAUProgramControl1 = 1; "(!Flag0 & 1) # (1 & Flag0);
+  PAUProgramControl0 = (!Flag0 & 0) # (1 & Flag0);
+  PAULoad0 = (!Flag0 & 0) # (0 & Flag0);
+}
+
+" Opcode: JNS
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 0, 1, 1, 0, 0, 0]) THEN {
+  ALUFblockControl3 = .X.;
+  ALUFblockControl2 = .X.;
+  ALUFblockControl1 = .X.;
+  ALUFblockControl0 = .X.;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = .X.;
+  ALUAddCarry = .X.;
+  ALUCarrySub = .X.;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+  DAUPostSelect = .X.;
+  DAUIncDecControl = .X.;
+  DAUAddressSourceControl1 = .X.;
+  DAUAddressSourceControl0 = .X.;
+  DAUOffsetSourceControl = .X.;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+  PAUProgramControl2 = 0; "(!Flag1 & 0) # (0 & Flag1);
+  PAUProgramControl1 = 1; "(!Flag1 & 1) # (1 & Flag1);
+  PAUProgramControl0 = (!Flag1 & 0) # (1 & Flag1);
+  PAULoad0 = 0; "(!Flag1 & 0) # (0 & Flag1);
+}
+
+" Opcode: JNU
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 1, 1, 1, 1, 0, 0]) THEN {
+  ALUFblockControl3 = .X.;
+  ALUFblockControl2 = .X.;
+  ALUFblockControl1 = .X.;
+  ALUFblockControl0 = .X.;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = .X.;
+  ALUAddCarry = .X.;
+  ALUCarrySub = .X.;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+  DAUPostSelect = .X.;
+  DAUIncDecControl = .X.;
+  DAUAddressSourceControl1 = .X.;
+  DAUAddressSourceControl0 = .X.;
+  DAUOffsetSourceControl = .X.;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+}
+
+" Opcode: JNV
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 1, 0, 1, 0, 0, 0]) THEN {
+  ALUFblockControl3 = .X.;
+  ALUFblockControl2 = .X.;
+  ALUFblockControl1 = .X.;
+  ALUFblockControl0 = .X.;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = .X.;
+  ALUAddCarry = .X.;
+  ALUCarrySub = .X.;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+  DAUPostSelect = .X.;
+  DAUIncDecControl = .X.;
+  DAUAddressSourceControl1 = .X.;
+  DAUAddressSourceControl0 = .X.;
+  DAUOffsetSourceControl = .X.;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+  PAUProgramControl2 = 0; "(!Flag2 & 0) # (0 & Flag2);
+  PAUProgramControl1 = 1; "(!Flag2 & 1) # (1 & Flag2);
+  PAUProgramControl0 = Flag2; "(!Flag2 & 0) # (1 & Flag2);
+  PAULoad0 = 0; "(!Flag2 & 0) # (0 & Flag2);
+}
+
+" Opcode: JS
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 0, 1, 1, 0, 1, 1]) THEN {
+  ALUFblockControl3 = .X.;
+  ALUFblockControl2 = .X.;
+  ALUFblockControl1 = .X.;
+  ALUFblockControl0 = .X.;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = .X.;
+  ALUAddCarry = .X.;
+  ALUCarrySub = .X.;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+  DAUPostSelect = .X.;
+  DAUIncDecControl = .X.;
+  DAUAddressSourceControl1 = .X.;
+  DAUAddressSourceControl0 = .X.;
+  DAUOffsetSourceControl = .X.;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+  PAUProgramControl2 = 0; "(Flag1 & 0) # (0 & !Flag1);
+  PAUProgramControl1 = 1; "(Flag1 & 1) # (1 & !Flag1);
+  PAUProgramControl0 = (Flag1 & 0) # (1 & !Flag1);
+  PAULoad0 = (Flag1 & 0) # (0 & !Flag1);
+}
+
+" Opcode: JU
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 1, 1, 1, 1, 1, 1]) THEN {
+  ALUFblockControl3 = .X.;
+  ALUFblockControl2 = .X.;
+  ALUFblockControl1 = .X.;
+  ALUFblockControl0 = .X.;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = .X.;
+  ALUAddCarry = .X.;
+  ALUCarrySub = .X.;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+  DAUPostSelect = .X.;
+  DAUIncDecControl = .X.;
+  DAUAddressSourceControl1 = .X.;
+  DAUAddressSourceControl0 = .X.;
+  DAUOffsetSourceControl = .X.;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+}
+
+" Opcode: JV
+WHEN ([InstructionReg15..InstructionReg8] == [1, 0, 1, 0, 1, 0, 1, 1]) THEN {
+  ALUFblockControl3 = .X.;
+  ALUFblockControl2 = .X.;
+  ALUFblockControl1 = .X.;
+  ALUFblockControl0 = .X.;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = .X.;
+  ALUAddCarry = .X.;
+  ALUCarrySub = .X.;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+  DAUPostSelect = .X.;
+  DAUIncDecControl = .X.;
+  DAUAddressSourceControl1 = .X.;
+  DAUAddressSourceControl0 = .X.;
+  DAUOffsetSourceControl = .X.;
+  DAUChangeX = 0;
+  DAUChangeS = 0;
+  PAUProgramControl2 = 0; "(Flag2 & 0) # (0 & !Flag2);
+  PAUProgramControl1 = 1; "(Flag2 & 1) # (1 & !Flag2);
+  PAUProgramControl0 = (Flag2 & 0) # (1 & !Flag2);
+  PAULoad0 = 0; "(Flag2 & 0) # (0 & !Flag2);
+}
+
+
+" These are special instructions for the state machine
+" Refer to the timing diagram to see what each cycle 
+" does
+
+" Cycle 1 CALL
+WHEN ((StateBits == Normal) & ([InstructionReg15..InstructionReg13] == [1, 1, 1])) THEN {
+  ALUFblockControl3 = .X.;
+  ALUFblockControl2 = .X.;
+  ALUFblockControl1 = .X.;
+  ALUFblockControl0 = .X.;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = .X.;
+  ALUAddCarry = .X.;
+  ALUCarrySub = .X.;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+
+  " Hold DAU
+
+  DAUPostSelect = 1; 
+  DAUIncDecControl = 0;
+  DAUOffsetSourceControl = 0; "InstructionReg9;
+  DAUAddressSourceControl1 = 1;
+  DAUAddressSourceControl0 = 0;
+  DAUChangeS = 0;
+  DAUChangeX = 0;
+
+  " Hold
+  PAUProgramControl2 = 0;
+  PAUProgramControl1 = 0;
+  PAUProgramControl0 = 0;
+  PAULoad0 = 0;
+  ControlReadSignal = 0;
+  ControlWriteSignal = 0;
+  
+  HoldIR = 1;
+}
+
+" Cycle 2 CALL
+WHEN (StateBits == Call1) THEN {
+  ALUFblockControl3 = .X.;
+  ALUFblockControl2 = .X.;
+  ALUFblockControl1 = .X.;
+  ALUFblockControl0 = .X.;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = .X.;
+  ALUAddCarry = .X.;
+  ALUCarrySub = .X.;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+
+  " Just decrement the S register
+
+  DAUPostSelect = 1; 
+  DAUIncDecControl = 0;
+  DAUOffsetSourceControl = 0; "InstructionReg9;
+  DAUAddressSourceControl1 = 1;
+  DAUAddressSourceControl0 = 0;
+  DAUChangeS = 1;
+  DAUChangeX = 0;
+
+
+  " Hold
+  PAUProgramControl2 = 0;
+  PAUProgramControl1 = 0;
+  PAUProgramControl0 = 0;
+  PAULoad0 = 0;
+  ControlReadSignal = 0;
+  ControlWriteSignal = 1;
+  
+  " Load hIGH Bits
+  ControlDataBus1 = 1;
+  ControlDataBus0 = 1;
+  HoldIR = 1;
+}
+
+" Cycle 3 CALL
+WHEN (StateBits == Call2) THEN{
+  ALUFblockControl3 = .X.;
+  ALUFblockControl2 = .X.;
+  ALUFblockControl1 = .X.;
+  ALUFblockControl0 = .X.;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = .X.;
+  ALUAddCarry = .X.;
+  ALUCarrySub = .X.;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+
+  " Just decrement the S register
+
+  DAUPostSelect = 1; 
+  DAUIncDecControl = 0;
+  DAUOffsetSourceControl = 0; "InstructionReg9;
+  DAUAddressSourceControl1 = 1;
+  DAUAddressSourceControl0 = 0;
+  DAUChangeS = 1;
+  DAUChangeX = 0;
+
+  " Hold
+
+  PAUProgramControl2 = 0;
+  PAUProgramControl1 = 0;
+  PAUProgramControl0 = 1;
+  PAULoad0 = 1;
+  ControlWriteSignal = 1;
+
+  ControlDataBus0 = 0;
+  ControlDataBus1 = 1;
+}
+
+" Cycle 4 CALL - Basically a NOP
+WHEN (StateBits == Call3) THEN{
+  ALUFblockControl3 = .X.;
+  ALUFblockControl2 = .X.;
+  ALUFblockControl1 = .X.;
+  ALUFblockControl0 = .X.;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = .X.;
+  ALUAddCarry = .X.;
+  ALUCarrySub = .X.;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+
+  " Just decrement the S register
+
+  DAUPostSelect = 0; 
+  DAUIncDecControl = 1;
+  DAUOffsetSourceControl = 0; "InstructionReg9;
+  DAUAddressSourceControl1 = 0;
+  DAUAddressSourceControl0 = 0;
+  DAUChangeS = 0;
+  DAUChangeX = 0;
+
+  " Hold
+
+  PAUProgramControl2 = 0;
+  PAUProgramControl1 = 0;
+  PAUProgramControl0 = 0;
+  PAULoad0 = 0;
+  ControlReadSignal = 0;
+  ControlWriteSignal = 0;
+  HoldIR = 0;
+
+}
+
+" Cycle 1 for RTS: load low
+WHEN ((InstructionReg == RTSInstruct) & (StateBits == Normal)) THEN {
+  ALUFblockControl3 = .X.;
+  ALUFblockControl2 = .X.;
+  ALUFblockControl1 = .X.;
+  ALUFblockControl0 = .X.;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = .X.;
+  ALUAddCarry = .X.;
+  ALUCarrySub = .X.;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+
+  " Get S
+
+  DAUPostSelect = 0; 
+  DAUIncDecControl = 1;
+  DAUOffsetSourceControl = 0; "InstructionReg9;
+  DAUAddressSourceControl1 = 1;
+  DAUAddressSourceControl0 = 0;
+  DAUChangeS = 1;
+  DAUChangeX = 0;
+
+  " load low 
+  PAUProgramControl2 = 1;
+  PAUProgramControl1 = 0;
+  PAUProgramControl0 = 0;
+  PAULoad0 = 1;
+  ControlReadSignal = 1;
+  ControlWriteSignal = 0;
+  HoldIR = 0;
+
+  ControlSelectDataBusPAU = 1;
+
+  HoldIR = 1;
+}
+
+
+" RTS Cycle 1: load from S Register into Accum
+" S is post incremented
+WHEN (StateBits == RTS1) THEN{
+  ALUFblockControl3 = .X.;
+  ALUFblockControl2 = .X.;
+  ALUFblockControl1 = .X.;
+  ALUFblockControl0 = .X.;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = .X.;
+  ALUAddCarry = .X.;
+  ALUCarrySub = .X.;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+
+  " Post inc S reg
+
+  DAUPostSelect = 0; 
+  DAUIncDecControl = 1;
+  DAUOffsetSourceControl = 0; 
+  DAUAddressSourceControl1 = 1;
+  DAUAddressSourceControl0 = 0;
+  DAUChangeS = 1;
+  DAUChangeX = 0;
+
+  " Load into the high bits of PAU
+  PAUProgramControl2 = 1;
+  PAUProgramControl1 = 0;
+  PAUProgramControl0 = 1;
+  PAULoad0 = 0;
+  ControlReadSignal = 1;
+  ControlWriteSignal = 0;
+  HoldIR = 0;
+  ControlSelectDataBusPAU = 1;
+}
+
+
+" RTS Cycle 2: load from S Register into Accum
+" S is post incremented
+WHEN (StateBits == RTS2) THEN{
+  ALUFblockControl3 = .X.;
+  ALUFblockControl2 = .X.;
+  ALUFblockControl1 = .X.;
+  ALUFblockControl0 = .X.;
+  ALUShiftHighControl2 = .X.;
+  ALUShiftHighControl1 = .X.;
+  ALUShiftHighControl0 = .X.;
+  ALUShiftLow1 = .X.;
+  ALUShiftLow0 = .X.;
+  ALUShiftMid = .X.;
+  ALUNotLoad = .X.;
+  ALUAddCarry = .X.;
+  ALUCarrySub = .X.;
+  ALUSelectShift = 0;
+  ALUSignZeroMask = 0;
+  ALUCarryOverflowMask = 0;
+  ALUSubtract = 0;
+  ALULoadFlags = 0;
+  ALUHold = 1;
+  ALUSetCarry = 0;
+
+  " Post inc S reg
+
+  DAUPostSelect = 1; 
+  DAUIncDecControl = 1;
+  DAUOffsetSourceControl = 0; 
+  DAUAddressSourceControl1 = 1;
+  DAUAddressSourceControl0 = 0;
+  DAUChangeS = 0;
+  DAUChangeX = 0;
+
+  " performs regular increment
+
+  PAUProgramControl2 = 0;
+  PAUProgramControl1 = 1;
+  PAUProgramControl0 = 1;
+  PAULoad0 = 0;
+  ControlReadSignal = 0;
+  ControlWriteSignal = 0;
+  HoldIR = 0;
+  ControlSelectDataBusPAU = 1;
+}
+
+" Determines whether or not to hold the instruction
+" Register if we see a call or RTS instruction
+WHEN (StateBits == Normal) THEN {
+  HoldIR = ([InstructionReg15..InstructionReg13] == [1, 1, 1]) # (InstructionReg == RTSInstruct);
+}
+
+
+
+StateBits.CLK = Clock;
+StateBits.CLR = Reset;
+
+
+" We need to hold IR if we are in a call or RTS instruction
+InstructionReg = (InstructionReg & HoldIR) # (InstructionBus & !HoldIR);
+
+STATE_DIAGRAM StateBits  " a Moore state machine
+
+
+STATE Normal:
+  IF ([InstructionReg15..InstructionReg13] == [1, 1, 1]) THEN Call1
+  ELSE IF (InstructionReg == RTSInstruct) THEN RTS1
+  ELSE Normal;
+STATE Call1:
+  GOTO Call2;
+STATE Call2:
+  GOTO Call3;
+STATE Call3:
+  GOTO Normal;
+STATE RTS1:
+  GOTO RTS2;
+STATE RTS2:
+  GOTO Normal;
+
+
+
+END  ControlAccess
+
+

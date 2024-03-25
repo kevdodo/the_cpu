@@ -1,0 +1,243 @@
+MODULE      ALU
+INTERFACE  (Data7..Data0,
+                FblockControl3..FblockControl0,
+                Subtract,
+                AddCarry,
+                CarrySub,
+                NotLoad,
+                ShiftMid, ShiftHighControl2..ShiftHighControl0, ShiftLow1..ShiftLow0,
+                SelectShift, 
+                SignZeroMask,
+                CarryOverflowMask,
+                LoadFlags,
+                SetCarry,
+                Hold,
+                Reset, Clock
+                -> Accum7..Accum0, Flags7..Flags0);
+
+TITLE       'Arithmetic Logic Unit';
+
+"  Description: This is the ALU module, which handles the
+" different instructions for the ALU. This includes instructions
+" such as adding, subtracting, shifting, negating, loading 
+" into accumulator. Consult excel spreadsheet for what signals and 
+" the right outputs of each module must be for a desired operation 
+
+"Inputs
+
+Data7..Data0                         pin;
+FblockControl3..FblockControl0       pin;
+
+
+"Define control signals
+AddCarry                             pin;
+CarrySub                             pin;
+
+" Used to set the right Overflow flag
+Subtract                             pin;
+
+NotLoad                              pin;
+ShiftMid                             pin;
+ShiftHighControl2..ShiftHighControl0 pin;
+ShiftLow1..ShiftLow0                 pin;
+SelectShift                          pin;
+
+" tells us to change/load the flags or not
+SignZeroMask                         pin;
+CarryOverflowMask                    pin;
+LoadFlags                            pin;
+
+Hold                                 pin;
+SetCarry                             pin;
+
+"Outputs
+Accum7..Accum0                       pin ISTYPE 'REG, KEEP';
+Flags7..Flags0                       pin ISTYPE 'REG, KEEP';
+
+" CarryOut / in
+CarryOut7..CarryOut0                 pin;
+
+
+" Reset and Clock;
+Reset                                pin;
+Clock                                pin;
+
+
+" Intermediate Terms
+Fblock7..Fblock0                    node;
+
+OutAdd7..OutAdd0                    node;
+CarryIn7..CarryIn0                  node;
+
+
+NotLoadOut7..NotLoadOut0            node;
+;
+Overflow                            node;
+Carry                               node;
+Zero                                node;
+Sign                                node;
+
+MiddleBits6..MiddleBits1            node;
+
+AccIntermediate7..AccIntermediate0  node;
+
+
+LowBit                              node;
+HighBit                             node;
+
+" Define busses
+
+Data     =   [Data7..Data0];
+Flags    =   [Flags7..Flags0];
+
+Accumulator = [Accum7..Accum0];
+
+
+" Define the CarryIn to have the right value
+
+" Subtraction requires carry in with one, CarryInCarryInv
+" if we want subtraction with carry
+
+CarryInCarry     = [CarryOut6..CarryOut0, Flags3];
+CarryInNoCarry   = [CarryOut6..CarryOut0, 0];
+CarryInOne       = [CarryOut6..CarryOut0, 1];
+CarryInCarryInv  = [CarryOut6..CarryOut0, !Flags3];
+
+CarryIn          = [CarryIn7..CarryIn0];
+
+CarryOut  = [CarryOut7..CarryOut0];
+
+OutAdd    = [OutAdd7..OutAdd0];
+
+Fblock    = [Fblock7..Fblock0];
+
+NotLoadOut = [NotLoadOut7..NotLoadOut0];
+
+MiddleBits = [MiddleBits6..MiddleBits1];
+
+"Used for the shifter block
+LeftBits  = [Accum7..Accum2];
+RightBits = [Accum5..Accum0];
+OutShift  = [HighBit, MiddleBits6..MiddleBits1, LowBit];
+
+AccIntermediate = [AccIntermediate7..AccIntermediate0];
+
+" Constants, change interrupt and User for later
+ZEROS = [0, 0, 0, 0, 0, 0, 0, 0];
+
+Interrupt = 0;
+User      = 0;
+
+EQUATIONS
+
+Accumulator.CLK = Clock;
+Accumulator.CLR = !Reset;
+
+Flags.CLK       = Clock;
+Flags.CLR       = !Reset;
+
+" Load the accumulator 
+NotLoadOut = Accumulator & !NotLoad;
+
+" Selects the correct CarryIn value, based off of the task
+CarryIn = (CarryInCarry & !CarrySub & AddCarry) #
+          (CarryInNoCarry & !CarrySub & !AddCarry) #
+          (CarryInOne     & CarrySub & !AddCarry) #
+          (CarryInCarryInv   & CarrySub & AddCarry);
+;
+
+" Fblock takes in the accumulator and Data offset
+" Relevant instructions for [FblockControl0..FblockControl3]: 
+
+" Pass B (1010)
+" Pass NOT B (0101)
+" Pass 1111
+" Pass A (1100)
+" Pass Not A (0011)
+" Pass OR (1110)
+" Pass XOR (0110)
+" Pass AND (1000)
+" Pass B (1010)
+
+Fblock = (FblockControl0 & !Accumulator & !Data) #
+(FblockControl1 & !Accumulator & Data) #
+(FblockControl2 & Accumulator & !Data) #
+(FblockControl3 & Accumulator & Data);
+
+
+" Adder logic
+CarryOut =  (Fblock & NotLoadOut) # (CarryIn & (Fblock $ NotLoadOut));
+OutAdd   =   Fblock $ NotLoadOut $ CarryIn;
+
+
+"Low bit selects the correct bit from the accumulator, 0, carry 
+LowBit = (Accum7 & !ShiftLow1 & !ShiftLow0) #
+         (0 & !ShiftLow1 & ShiftLow0) #
+         (Accum6 & ShiftLow1 & !ShiftLow0) #
+         (Carry & ShiftLow1 & ShiftLow0);
+ 
+
+" This shifts the middle bits to be 
+" either the left bits or the right bits
+MiddleBits = (LeftBits & ShiftMid) # 
+             (RightBits & !ShiftMid);
+
+
+" Mux for the high bit shifter
+" This selects what accumulator bit, 0, or carry that the high bit
+" should be
+HighBit  = (Accum5 & !ShiftHighControl2 & !ShiftHighControl1 & !ShiftHighControl0) #
+            (Accum4 & !ShiftHighControl2 & !ShiftHighControl1 & ShiftHighControl0) #
+            (Accum0 & !ShiftHighControl2 & ShiftHighControl1 & !ShiftHighControl0) #
+            (0 & !ShiftHighControl2 & ShiftHighControl1 & ShiftHighControl0) # 
+            (Carry & ShiftHighControl2 & !ShiftHighControl1 & !ShiftHighControl0);
+
+" Output of the last mux should either be selected
+" from the shifter or the adder
+AccIntermediate = (OutShift & SelectShift) # 
+              (OutAdd & !SelectShift);
+
+" Output of the accumulator dependent on whether
+" or not we need to hold 
+Accumulator = (AccIntermediate & !Hold) # (Accumulator & Hold);
+
+" compute the flags (same signs as the adder/sub alu unit)
+" These flags come as an output of the adder, will need to 
+" change for changing flags from the shifter
+
+Carry = CarryOut7 $ Subtract;
+
+" Check if all the values are Zero
+Zero = (OutAdd == ZEROS); 
+
+" same as unsigned overflow
+Sign = OutAdd7; 
+Overflow = CarryOut7 $ CarryIn7;
+
+" Flags are muxes that are selected based off of whether or not to select the signal,
+" the signal from the data bus, or the previous signal
+" Flags 4-7 are not really used right now and are just the output of whether or not to 
+" load the flags. 
+
+" The sign and zero flags are always changed together,
+" so they only need the SignZeroMask
+" Same with the Carry and overflow flag (SignZeroMask)
+
+" Zero Flag
+Flags[0] = (Zero & !LoadFlags & SignZeroMask) # (Data[0] & LoadFlags) # (Flags[0] & !LoadFlags & !SignZeroMask);
+
+" Sign Flag
+Flags[1] = (Sign & SignZeroMask & !LoadFlags) # (Data[1] & LoadFlags) # (Flags[1] & !SignZeroMask & !LoadFlags);
+
+" Overflow Flag
+Flags[2] = (Overflow & CarryOverflowMask & !LoadFlags) # (Data[2] & LoadFlags) # (Flags[2] & !CarryOverflowMask & !LoadFlags);
+
+" Carry Flag
+Flags[3] = (Carry & CarryOverflowMask & !LoadFlags) # (SetCarry) # (Data[3] & LoadFlags) # (Flags[3] & !CarryOverflowMask & !LoadFlags);
+Flags[4] = 0;
+Flags[5] = (Data[5] & LoadFlags) # (Flags[5] & !LoadFlags);
+Flags[6] = 0;
+Flags[7] = (Data[7] & LoadFlags) # (Flags[7] & !LoadFlags);
+
+END ALU
+

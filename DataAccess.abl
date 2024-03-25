@@ -1,0 +1,163 @@
+MODULE      DataAccess
+
+INTERFACE  (Accum7..Accum0, Offset7..Offset0,
+                PostSelect,
+                IncDecControl,
+                AddressSourceControl1,AddressSourceControl0, 
+                OffsetSourceControl,
+                ChangeX,
+                ChangeS,
+                Reset, Clock
+                -> DataAddr7..DataAddr0, XReg7..XReg0, SReg7..SReg0);
+TITLE      'Data Address module';
+
+" Description:  This module is is the Data Access Unit. 
+
+" It takes in the Accumulator, offset, and control Signals
+" and updates the x register and s register values
+" The OffsetSourceControl tells us whether or not to 
+" use the offset value to add,
+
+" PostSelect refers to using the output of the incremented
+
+" IncDec tells us to increment or decrement (1) for inc
+
+"Address Souce controls tells us to use zero, X, or S register
+
+" Change X and S tells us whether or not to change
+" as a result of incrementing decrementing.
+
+
+" Inputs:       Accum[7..0]    - 8 bits of data or offset input
+"               Offset[12..0]  - 13 bits of address or data input
+
+"               Control Signals  - Documented above
+"               Reset            - system reset
+"               Clock            - system clock
+"
+
+
+" Revision History:
+" 02/06/18   Glen George  Initial Revision
+" 02/14/18   Glen George  Fixed some typos
+" 02/14/18   Glen George  Specialized for Program Memory Access Unit
+" 01/08/20   Glen George  Updated comments
+" 01/04/21   Glen George  Updated comments
+" 04/02/24   Kevin Do     Modified for Data Access Unit
+
+" Inputs
+Offset7..Offset0         pin;  "Input of the 8-bit offset
+Accum7..Accum0           pin;
+
+
+PostSelect               pin;
+IncDecControl            pin;
+AddressSourceControl1    pin;
+AddressSourceControl0    pin;
+OffsetSourceControl      pin;
+ChangeX                  pin;
+ChangeS                  pin;
+ChangeAcc                pin;
+
+
+" Outputs
+DataAddr7..DataAddr0              pin ; " Program counter output
+XReg7..XReg0                      pin ISTYPE 'REG, KEEP';
+SReg7..SReg0                      pin ISTYPE 'REG, KEEP';
+
+
+"Clock/reset Input
+Clock               pin;   " Clock
+Reset               pin;   " Reset - Note it's active low
+
+" Intermediate terms
+
+PrePostSelect7..PrePostSelect0   node;  " Output of the mux
+
+CarryOutIncDec7..CarryOutIncDec0 node;
+
+CarryOutData7..CarryOutData0     node;
+
+IncDec7..IncDec0                 node;
+
+IncDecOne7..IncDecOne0           node;
+
+AddressSourceSelect7..AddressSourceSelect0 node;
+
+OffsetSourceSelect7..OffsetSourceSelect0 node;
+
+" Buses
+DataOff    =  [Offset7..Offset0];		"8 bits of data or offset
+PrePostSelect = [PrePostSelect7..PrePostSelect0];
+
+DataAddr = [DataAddr7..DataAddr0];
+XReg = [XReg7..XReg0];
+SReg = [SReg7..SReg0];
+Accum = [Accum7..Accum0];
+
+IncDecOne = [IncDecOne7..IncDecOne0];
+
+CarryOutIncDec = [CarryOutIncDec7..CarryOutIncDec0];
+CarryInIncDec = [CarryOutIncDec6..CarryOutIncDec0, 0];
+
+IncDec = [IncDec7..IncDec0];
+
+CarryInData = [CarryOutData6..CarryOutData0, 0];
+CarryOutData = [CarryOutData7..CarryOutData0];
+
+AddressSourceSelect = [AddressSourceSelect7..AddressSourceSelect0];
+
+OffsetSourceSelect = [OffsetSourceSelect7..OffsetSourceSelect0];
+
+
+" Constants
+ZEROS   =  [ 0, 0, 0, 0, 0, 0, 0, 0 ];    " 8-bit value of 0
+ONE      = [ 0, 0, 0, 0, 0, 0, 0, 1 ];    " 8-bit value of 1
+NEG_ONE = [1, 1, 1, 1, 1, 1, 1, 1];
+
+
+" needs to increment, jump to, jump relative, stay at, load high bits, load low bits
+
+EQUATIONS
+
+" Clock and Reset
+XReg.CLK = Clock;
+SReg.CLK = Clock;
+XReg.CLR = !Reset;
+SReg.CLR = !Reset;
+
+" Selects which register or ZEROS to add
+AddressSourceSelect = (ZEROS & !AddressSourceControl1 & !AddressSourceControl0) #
+                      (XReg & !AddressSourceControl1 & AddressSourceControl0) # 
+                      (SReg & AddressSourceControl1 & !AddressSourceControl0);
+
+
+" Selects Whether or not to use the offset
+OffsetSourceSelect =  (DataOff & OffsetSourceControl) #
+                      (ZEROS & !OffsetSourceControl);
+
+" Selects positive or neg 1 to add
+IncDecOne = (ONE & IncDecControl) # 
+            (NEG_ONE & !IncDecControl);
+
+" Increments or decrements the Address Source
+CarryOutIncDec  =  (AddressSourceSelect & IncDecOne) # (CarryInIncDec & (AddressSourceSelect $ IncDecOne));
+" Output of the incremented/decremented
+IncDec   =  AddressSourceSelect $ IncDecOne $ CarryInIncDec;
+
+" Registers should be the output of the increment decrement
+XReg = (ChangeX & IncDec) # (XReg & !ChangeX); 
+SReg = (ChangeS & IncDec) # (SReg & !ChangeS); 
+
+
+" Pre means add everything then inc/dec
+" Post means inc/dec before add everything 
+" Output of the Pre/Post select mux thing
+PrePostSelect = (IncDec & PostSelect) # (AddressSourceSelect & !PostSelect);
+
+" Adds the output of the PrePostSelect and 
+" the offset to put into the mux
+CarryOutData  =  (PrePostSelect & OffsetSourceSelect) # (CarryInData & (PrePostSelect $ OffsetSourceSelect));
+DataAddr      =  PrePostSelect $ OffsetSourceSelect $ CarryInData;
+
+END  DataAccess

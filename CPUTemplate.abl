@@ -1,0 +1,300 @@
+MODULE      CPU
+
+INTERFACE  (ProgramDB15..ProgramDB0, DataDB7..DataDB0,
+                Reset, Clock
+                -> ProgramAB12..ProgramAB0, 
+                DataAB7..DataAB0, RD, WR, IO,
+                Accum7..Accum0, Flags7..Flags0, XReg7..XReg0, SReg7..SReg0, InstructionReg15..InstructionReg0, ControlWriteSignal);
+TITLE      'Caltech10 CPU'
+
+
+" Description:  This is the template file for implementing the Caltech10 CPU.
+"               It is the top-level module which will instantiate and connect
+"               all other modules.
+"
+" Inputs:         ProgramDB[15..0]  - the 16-bit program data bus
+"                 Reset             - system reset signal
+"                 Clock             - system clock
+"
+" I/O:            DataDB[7..0]      - the 8-bit data data bus
+"
+" Outputs:        ProgramAB[12..0]  - the 13-bit program address bus
+"                 DataAB[7..0]      - the 8-bit data address bus
+"                 RD                - read signal for the data data bus
+"                 WR                - write signal for the data data bus
+"                 IO                - memory (0) or I/O (1) is being accessed
+"
+" Status Outputs: Accum[7..0]       - the 8-bit accumulator
+"                 Flags[7..0]       - the 8-bit flag register
+"                 XReg[7..0]        - the 8-bit X register
+"                 SReg[7..0]        - the 8-bit S register
+
+
+" Revision History:
+" 02/15/18   Glen George  Initial Revision
+" 01/05/21   Glen George  Updated comments
+" 03/08/24   Kevin Do     implementing CPU
+
+
+
+" Pin/Signal Declarations
+
+" Inputs
+
+ProgramDB15..ProgramDB0	pin;	"input  16-bit instruction data bus
+Reset                	pin;	"input  system reset signal
+Clock           	    pin;	"input  system clock
+
+ControlWriteSignal      pin;
+
+InstructionReg15..InstructionReg0   pin;
+
+" I/O
+
+DataDB7..DataDB0	pin;	"I/O  8-bit Data data bus
+
+
+" Outputs
+
+ProgramAB12..ProgramAB0	pin;	"output  the 13-bit Program address bus
+DataAB7..DataAB0	pin;	"output  the 8-bit Data address bus
+RD			pin;	"output  read signal for the Data data bus
+WR			pin;	"output  write signal for the Data data bus
+IO			pin;	"output  accessing memory (0) or I/O (1)
+
+
+" Debugging/Status Outputs
+
+Accum7..Accum0		pin;	"the 8-bit accumulator
+Flags7..Flags0		pin;	"the flags (8 bits)
+XReg7..XReg0		pin;	"the 8-bit X register
+SReg7..SReg0		pin;	"the 8-bit S register
+
+PAUOffset7..PAUOffset0 pin;
+
+ALUData7..ALUData0  pin;
+
+
+" need to send regular increment signal to PAU when doing regular instructions
+" off the control unit's clock
+
+
+" Internal signals
+
+" declare the used modules
+
+ALU INTERFACE  (Data7..Data0,
+                FblockControl3..FblockControl0,
+                Subtract,
+                AddCarry,
+                CarrySub,
+                NotLoad,
+                ShiftMid, ShiftHighControl2..ShiftHighControl0, ShiftLow1..ShiftLow0,
+                SelectShift, 
+                SignZeroMask,
+                CarryOverflowMask,
+                LoadFlags,
+                SetCarry,
+                Hold,
+                Reset, Clock
+                -> Accum7..Accum0, Flags7..Flags0);
+
+DataAccess INTERFACE  (Accum7..Accum0, Offset7..Offset0,
+                PostSelect,
+                IncDecControl,
+                AddressSourceControl1,AddressSourceControl0, 
+                OffsetSourceControl,
+                ChangeX,
+                ChangeS,
+                Reset, Clock
+                -> DataAddr7..DataAddr0, XReg7..XReg0, SReg7..SReg0);
+
+ProgramAccess INTERFACE  (Offset7..Offset0, Direct12..Direct0,
+                          ProgramControl2..ProgramControl0, Load0,
+                          Reset, Clock
+                          -> ProgAddr12..ProgAddr0, PC12..PC0);
+ControlAccess INTERFACE  (Instruction15..Instruction0,
+            Flag7..Flag0, 
+            Reset, Clock
+                          -> 
+" ALU control signals
+ALUFblockControl3..ALUFblockControl0,
+ALUSubtract,
+ALUAddCarry,
+ALUCarrySub,
+ALUNotLoad,
+ALUShiftMid,
+ALUShiftHighControl2..ALUShiftHighControl0,
+ALUShiftLow1..ALUShiftLow0,
+ALUSelectShift, 
+ALUSignZeroMask,
+ALUCarryOverflowMask,
+ALULoadFlags,
+ALUSetCarry,
+ALUHold,
+" Data access stuff
+DAUPostSelect,
+DAUIncDecControl,
+DAUAddressSourceControl1,
+DAUAddressSourceControl0, 
+DAUOffsetSourceControl,
+DAUChangeX,
+DAUChangeS,
+" Program Access signals
+PAUProgramControl2..PAUProgramControl0,
+PAULoad0,
+" PAU offset - 0 takes it from the instruction (immediate addressing), 
+"              1 is from DataDB (absolute addressing)
+ControlSelectDataBusPAU,
+" DataDB Control Signals
+ControlDataBus1,
+ControlDataBus0,
+
+" ALU Data Input Signals
+" 10 for s reg, 11 for immediate (ProgramAB)
+" 00 for Datadb, 01 for x reg
+ControlALUDataInput1,
+ControlALUDataInput0,
+
+" Control Control signals
+ControlWriteSignal,
+ControlIOSignal,
+ControlReadSignal,
+" Instruction Register
+InstructionReg15..InstructionReg0
+)
+
+" create instances of the modules
+ALUnit      FUNCTIONAL_BLOCK  ALU;
+DAUnit      FUNCTIONAL_BLOCK  DataAccess;
+ControlUnit FUNCTIONAL_BLOCK  ControlAccess;
+PAU         FUNCTIONAL_BLOCK  ProgramAccess;
+
+
+" Busses
+
+ProgramAB  =  [ProgramAB12..ProgramAB0];   "13-bit Program address bus
+ProgramDB  =  [ProgramDB15..ProgramDB0];   "16-bit Program data bus
+DataAB     =  [DataAB7..DataAB0];	       "8-bit Data address bus
+DataDB     =  [DataDB7..DataDB0];	       "8-bit Data data bus
+
+ALUDataInput = [ALUData7..ALUData0];      " 8-bit Data for alu
+PAUOffset = [PAUOffset7..PAUOffset0];      " 8-bit Data for alu
+
+SReg = [SReg7..SReg0];
+
+InstructionReg = [InstructionReg15..InstructionReg0];
+Accumulator = [Accum7..Accum0];
+Flags = [Flags7..Flags0];
+XReg = [XReg7..XReg0];
+
+EQUATIONS   
+
+"Debugging stuff
+ControlWriteSignal = ControlUnit.ControlWriteSignal;
+InstructionReg = ControlUnit.[InstructionReg15..InstructionReg0];
+Accumulator = ALUnit.[Accum7..Accum0];
+SReg = DAUnit.[SReg7..SReg0];
+XReg = DAUnit.[XReg7..XReg0];
+Flags = ALUnit.[Flags7..Flags0];
+
+ALUDataInput =  (DataDB & !ControlUnit.ControlALUDataInput1 & !ControlUnit.ControlALUDataInput0) #
+                ([XReg7..XReg0] & !ControlUnit.ControlALUDataInput1 & ControlUnit.ControlALUDataInput0) # 
+                ([SReg7..SReg0] & ControlUnit.ControlALUDataInput1 & !ControlUnit.ControlALUDataInput0) # 
+                (ControlUnit.[InstructionReg7..InstructionReg0] & ControlUnit.ControlALUDataInput1 & ControlUnit.ControlALUDataInput0);
+
+" Output of what  the DataDB should be written to
+" 00 for Accumulator, 01 For Flags, 10 for 
+" Low bits of the Program Counter, 11 For
+" The high bits of the PC 
+DataDB = (ALUnit.[Accum7..Accum0] & !ControlUnit.ControlDataBus1 & !ControlUnit.ControlDataBus0) #
+         (ALUnit.[Flags7..Flags0] & !ControlUnit.ControlDataBus1 & ControlUnit.ControlDataBus0) #
+         (PAU.[PC7..PC0] & ControlUnit.ControlDataBus1 & !ControlUnit.ControlDataBus0) #
+         (PAU.[0, 0, 0, PC12..PC8] & ControlUnit.ControlDataBus1 & ControlUnit.ControlDataBus0);
+
+" Output of the mux that selects what the PAU
+" Offset signals should be
+" 0 For Instruction Reg, and 1 for the DataDB
+PAUOffset = (ControlUnit.[InstructionReg7..InstructionReg0] & !ControlUnit.ControlSelectDataBusPAU) #
+            (DataDB & ControlUnit.ControlSelectDataBusPAU);
+
+
+" Control Unit Inputs
+ControlUnit.[Instruction15..Instruction0] = ProgramDB;
+ControlUnit.[Flag7..Flag0] = ALUnit.[Flags7..Flags0];
+ControlUnit.Clock = Clock;
+ControlUnit.Reset = Reset;
+
+" ALU controls
+
+ALUnit.[FblockControl3..FblockControl0] = ControlUnit.[ALUFblockControl3..ALUFblockControl0];
+ALUnit.Subtract = ControlUnit.ALUSubtract;
+ALUnit.AddCarry = ControlUnit.ALUAddCarry;
+ALUnit.CarrySub = ControlUnit.ALUCarrySub;
+ALUnit.NotLoad  = ControlUnit.ALUNotLoad;
+ALUnit.ShiftMid = ControlUnit.ALUShiftMid;
+ALUnit.[ShiftHighControl2..ShiftHighControl0] = ControlUnit.[ALUShiftHighControl2..ALUShiftHighControl0];
+
+ALUnit.[ShiftLow1..ShiftLow0] = ControlUnit.[ALUShiftLow1..ALUShiftLow0];
+ALUnit.SelectShift = ControlUnit.ALUSelectShift;
+ALUnit.SignZeroMask = ControlUnit.ALUSignZeroMask;
+ALUnit.CarryOverflowMask = ControlUnit.ALUCarryOverflowMask;
+ALUnit.LoadFlags = ControlUnit.ALULoadFlags;
+ALUnit.SetCarry  = ControlUnit.ALUSetCarry;
+ALUnit.Hold  = ControlUnit.ALUHold;
+ALUnit.Clock = Clock;
+ALUnit.Reset = !Reset;
+
+ALUnit.[Data7..Data0] = ALUDataInput;
+
+" DAU controls
+
+DAUnit.PostSelect = ControlUnit.DAUPostSelect;
+DAUnit.IncDecControl = ControlUnit.DAUIncDecControl;
+DAUnit.AddressSourceControl1 = ControlUnit.DAUAddressSourceControl1;
+DAUnit.AddressSourceControl0 = ControlUnit.DAUAddressSourceControl0;
+DAUnit.OffsetSourceControl = ControlUnit.DAUOffsetSourceControl;
+DAUnit.ChangeX = ControlUnit.DAUChangeX;
+DAUnit.ChangeS = ControlUnit.DAUChangeS;
+DAUnit.Reset = !Reset;
+DAUnit.Clock = Clock;
+
+
+" TODO: check the accumulator
+DataAB = DAUnit.[DataAddr7..DataAddr0];
+DAUnit.[Accum7..Accum0]   = DataAB;
+DAUnit.[Offset7..Offset0] = ControlUnit.[InstructionReg7..InstructionReg0];
+
+
+" PAU controls
+
+PAU.[Offset7..Offset0] = PAUOffset;
+PAU.[Direct12..Direct0] = ControlUnit.[InstructionReg12..InstructionReg0];
+PAU.[ProgramControl2..ProgramControl0] = ControlUnit.[PAUProgramControl2..PAUProgramControl0];
+PAU.Load0 = ControlUnit.PAULoad0;
+PAU.Reset = !Reset;
+PAU.Clock = Clock;
+
+ProgramAB = PAU.[PC12..PC0];
+
+WR = ControlUnit.ControlWriteSignal;
+RD = ControlUnit.ControlReadSignal;
+IO = ControlUnit.ControlIOSignal;
+
+" Data data bus is enabled when writing
+DataDB.OE  =  ControlUnit.ControlWriteSignal;
+
+" most signals are always enabled
+ProgramAB.OE         =  ^h1FFF;
+DataAB.OE            =  ^hFF;
+RD.OE                =  1;
+WR.OE                =  1;
+IO.OE                =  1;
+[Accum7..Accum0].OE  =  ^hFF;
+[Flags7..Flags0].OE  =  ^hFF;
+[XReg7..XReg0].OE    =  ^hFF;
+[SReg7..SReg0].OE    =  ^hFF;
+
+
+
+END  CPU

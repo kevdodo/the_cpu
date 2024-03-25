@@ -1,0 +1,135 @@
+MODULE      ProgramAccess
+
+INTERFACE  (Offset7..Offset0, Direct12..Direct0,
+                          ProgramControl2..ProgramControl0, Load0,
+                          Reset, Clock
+                          -> ProgAddr12..ProgAddr0, PC12..PC0);
+TITLE      'Program Address module';
+
+" Description:  This module is is the Program Access Unit. It takes in the 
+"               Offest and direct values, and changes the program counter
+"               accordingly. The values of the accumulator only changes when
+"               Program Counter changes, which only happens with each CPU clock
+
+"               If we load a 13 bit value, we want to load either the high or low bits
+"               first, then keep the load signal off to use the previous value 
+
+" Inputs:       Offset[7..0]    - 8 bits of data or offset input
+"               Direct[12..0]  - 13 bits of address or data input
+"               ProgramControl[2..0]   - 3 bits of control input
+"               Load0            - Signal to tell if we should load previous counter 
+"               Reset            - system reset
+"               Clock            - system clock
+"
+" Outputs:      ProgAddr[12..0]  - output ProgramAddress
+"               PC[12..0]        - output ProgramCounter (same as progAddr)
+
+
+" Revision History:
+" 02/06/18   Glen George  Initial Revision
+" 02/14/18   Glen George  Fixed some typos
+" 02/14/18   Glen George  Specialized for Program Memory Access Unit
+" 01/08/20   Glen George  Updated comments
+" 01/04/21   Glen George  Updated comments
+
+" Inputs
+Offset7..Offset0        pin;  "Input of the 8-bit offset
+Direct12..Direct0       pin;  "Input of the 13-bit address
+
+ProgramControl2..ProgramControl0 pin; "3 control signals
+Load0               pin;              "Keep program counter, 0 keeps, 1 sets PC=zeros
+
+Carryout12..Carryout0   pin;          " For addition
+
+
+" Outputs
+ProgAddr12..ProgAddr0   pin;          " Program address output - Same as counter
+PC12..PC0               pin ISTYPE 'REG, KEEP'; " Program counter output
+
+
+"Clock Input
+
+Clock               pin;   " Clock
+
+" Reset
+
+Reset               pin;   " Reset - Note it's active low
+
+" Intermediate terms
+
+outMux12..outMux0   node;  " Output of the mux
+pload12..pload0     node;  " Output of the program loaded
+
+" Buses
+
+DataOff    =  [Offset7..Offset0];		"8 bits of data or offset
+DirectAddr =  [Direct12..Direct0];              " 13 bit address to jump to
+
+ProgramAddress = [ProgAddr12..ProgAddr0]; " 13 bit current program address updated to counter
+ProgramCounter = [PC12..PC0];             " 13 bit current program counter
+
+ProgramLoaded = [pload12..pload0];     " Output of programcounter & !load 
+
+CarryOut = [Carryout12..Carryout0];    " Carryout term to sum counter and address
+CarryIn  = [Carryout11..Carryout0, 0]; " Carryin term. Note that carryin is previous
+                                       " carryout, with 0 at the start as it's just addition
+
+HighBits = [Offset4..Offset0, 0, 0, 0, 0, 0, 0, 0, 0]; " Store the low 5 bits to save to high bits
+LowBits = [0,0,0,0,0, Offset7..Offset0];               " Store the low 8 bits of the offset
+
+" Sign extend the data offset to add stuff with the program counter
+DataOff13  =  [Offset7, Offset7, Offset7, Offset7, Offset7, Offset7..Offset0]; " Extends the offset to 13-bit
+
+outMux = [outMux12..outMux0]; " Intermediate term to store the output of the mux
+
+
+" declare the unit to be tested
+
+" create an instance of the unit to be tested
+
+" Constants
+ZEROS   =  [ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 ];    " 8-bit value of 0
+ONE      = [  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 ];    " 8-bit value of 1
+
+
+" needs to increment, jump to, jump relative, stay at, load high bits, load low bits
+
+EQUATIONS
+
+" Clock and Reset
+ProgramCounter.CLK = Clock;
+ProgramCounter.CLR = !Reset;
+
+" This is a 13 bit mux
+outMux  = (ZEROS & !ProgramControl2 & !ProgramControl1 & !ProgramControl0) #  
+                                                        " 000 - Stay command
+
+        (DirectAddr & Load0 & !ProgramControl2 & !ProgramControl1 & ProgramControl0) # " Load0, 001 - Jumpto address
+
+        (DataOff13 & !ProgramControl2 & ProgramControl1 & !ProgramControl0) #
+                                                                                "!Load 010 - JumpRelative
+        (ONE & !ProgramControl2 & ProgramControl1 & ProgramControl0) #
+                                                                                "!Load 011 - Increment
+
+        " Make sure to set load on when we're doing load instructions
+        " When we load high and low, we can add them to get the actual 
+        " instruction
+
+        (LowBits & ProgramControl2 & !ProgramControl1 & !ProgramControl0) #
+                                                    " 100 - Load Low bits
+                                                    
+        (HighBits & ProgramControl2 & !ProgramControl1 & ProgramControl0);
+                                                    " 101 - Load High bits
+
+
+
+ProgramLoaded = ProgramCounter & !Load0; " When load0 is on, programcount is 0 
+
+"Add the output of the mux and and output of program loaded to get final instruction.
+
+CarryOut  =  (outMux & ProgramLoaded) # (CarryIn & (outMux $ ProgramLoaded));
+ProgramCounter   :=  outMux $ ProgramLoaded $ CarryIn;
+
+ProgramAddress   =  ProgramCounter;
+
+END  ProgramAccess
